@@ -1,0 +1,41 @@
+# Extra stuff for local development
+
+services:
+  drift-monitor:
+    build:
+      context: ../.. # Build from root of unshred repo
+      dockerfile: examples/drift-monitor/Dockerfile
+      target: development
+    volumes:
+      - ../../src:/app/src:ro # unshred source
+      - ../../Cargo.toml:/app/Cargo.toml:ro
+      - ./src:/app/examples/drift-monitor/src:ro # drift-monitor source
+      - ./Cargo.toml:/app/examples/drift-monitor/Cargo.toml:ro
+    environment:
+      - RUST_BACKTRACE=1
+      - CARGO_TARGET_DIR=/app/target
+      - CARGO_HOME=/usr/local/cargo
+      - RUST_LOG=info
+
+  # Mock validator for local testing
+  mock-validator:
+    build:
+      context: ../..
+      dockerfile: examples/drift-monitor/Dockerfile
+      target: development
+      args:
+        BIN_NAME: mock_validator
+    container_name: drift-mock-validator
+    environment:
+      - TARGET_ADDR=drift-monitor:8001
+      - SHREDS_PER_SECOND=2048
+      - RUST_LOG=info
+    networks:
+      - drift-net
+    depends_on:
+      - drift-monitor
+    volumes:
+      - ../../src:/app/src:ro
+      - ../../Cargo.toml:/app/Cargo.toml:ro
+      - ./src:/app/examples/drift-monitor/src:ro
+      - ./Cargo.toml:/app/examples/drift-monitor/Cargo.toml:ro
