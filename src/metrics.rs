@@ -60,7 +60,7 @@ impl Metrics {
             processor_transactions_processed: register_int_counter_vec_with_registry!(
                 "processor_transactions_processed_total",
                 "Total transactions processed by type",
-                &["type", "confirmed"],
+                &["type"],
                 registry.clone()
             )?,
             processor_fec_sets_completed: register_int_counter_vec_with_registry!(

@@ -2,7 +2,7 @@
 Reconstructs Solana transactions from shreds in real time.
 * Ingests shreds via UDP
 * Parallelizes processing across Forward Error Correction (FEC) sets and entry batches
-* Processes transactions via user-provided handlers
+* Processes transactions via user-provided handler
 * Provides optional Prometheus metrics for system performance monitoring
 
 ## Quick start
@@ -14,9 +14,10 @@ struct MyHandler;
 
 impl TransactionHandler for MyHandler {
     fn handle_transaction(&self, event: &TransactionEvent) -> Result<()> {
+        let signature = solana_sdk::bs58::encode(&event.transaction.signatures[0]).into_string();
         println!("Slot {}: {} with {} instructions",
             event.slot,
-            event.signature,
+            signature,
             event.transaction.message.instructions().len()
         );
         Ok(())
@@ -57,25 +58,24 @@ The example demonstrates the activation of the internal metrics for `unshred`:
 pub trait TransactionHandler: Send + Sync + 'static {
     /// Called for each reconstructed transaction
     /// # Returns
-    /// * `Ok(())` to continue processing
-    /// * `Err(_)` to log error and continue (does not stop processing)
+    /// * `Ok(())` - to continue processing
+    /// * `Err(_)` - to log error and continue (does not stop processing)
     fn handle_transaction(&self, event: &TransactionEvent) -> Result<()>;
 }
 ```
 
 ### TransactionEvent
 ```rust
+#[derive(Debug)]
 pub struct TransactionEvent<'a> {
     pub slot: u64,
-    pub signature: String,
     pub transaction: &'a VersionedTransaction,
-    /// * `Some(_)` if the data shred that contained this transaction was directly received
-    /// * `None`    if the data shred that contained this transaction was recovered via code shreds
+    /// * `Some(_)` - data shred containing this transaction was directly received via UDP
+    /// * `None`    - data shred containing this transaction was recovered via code shreds
     ///
     /// Note: Estimated as the received_at_micros of the data shred that contained
     ///       the first byte of the Entry that contained this transaction.
     pub received_at_micros: Option<u64>,
     pub processed_at_micros: u64,
-    pub confirmed: bool,
 }
 ```

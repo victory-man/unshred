@@ -19,16 +19,14 @@ use crate::processor::ShredProcessor;
 #[derive(Debug)]
 pub struct TransactionEvent<'a> {
     pub slot: u64,
-    pub signature: String,
     pub transaction: &'a VersionedTransaction,
-    /// * `Some(_)` - data shred containing this transaction was directly received
+    /// * `Some(_)` - data shred containing this transaction was directly received via UDP
     /// * `None`    - data shred containing this transaction was recovered via code shreds
     ///
     /// Note: Estimated as the received_at_micros of the data shred that contained
     ///       the first byte of the Entry that contained this transaction.
     pub received_at_micros: Option<u64>,
     pub processed_at_micros: u64,
-    pub confirmed: bool,
 }
 
 pub trait TransactionHandler: Send + Sync + 'static {

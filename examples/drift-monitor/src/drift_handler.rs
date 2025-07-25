@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use prometheus::{register_int_counter_vec_with_registry, IntCounterVec, Registry};
-use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
+use solana_sdk::{bs58, pubkey::Pubkey, transaction::VersionedTransaction};
 use tokio::sync::mpsc::Sender;
 use unshred::{TransactionEvent, TransactionHandler};
 
@@ -53,8 +53,7 @@ impl DriftHandler {
 
                     let event = DriftEvent {
                         slot: event.slot,
-                        signature: event.signature.clone(),
-                        confirmed: event.confirmed,
+                        signature: bs58::encode(&event.transaction.signatures[0]).into_string(),
                         instruction_data: bs58::encode(&instruction.data).into_string(),
                         accounts: event
                             .transaction

@@ -7,7 +7,6 @@ use anyhow::Result;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
-use solana_sdk::bs58;
 use std::{
     io::Cursor,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -671,8 +670,7 @@ impl ShredProcessor {
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
         for entry_meta in entries {
-            Self::process_entry_transactions(batch_work.slot, &entry_meta, false, tx_handler)
-                .await?;
+            Self::process_entry_transactions(batch_work.slot, &entry_meta, tx_handler).await?;
         }
 
         Ok(())
@@ -780,20 +778,17 @@ impl ShredProcessor {
     async fn process_entry_transactions<H: TransactionHandler>(
         slot: u64,
         entry_meta: &EntryMeta,
-        confirmed: bool,
         handler: &Arc<H>,
     ) -> Result<()> {
         for tx in &entry_meta.entry.transactions {
             let event = TransactionEvent {
                 slot,
-                signature: bs58::encode(&tx.signatures[0]).into_string(),
                 transaction: tx,
                 received_at_micros: entry_meta.received_at_micros,
                 processed_at_micros: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_micros() as u64,
-                confirmed,
             };
 
             if let Err(e) = handler.handle_transaction(&event) {
@@ -807,7 +802,7 @@ impl ShredProcessor {
                 if let Some(metrics) = Metrics::try_get() {
                     metrics
                         .processor_transactions_processed
-                        .with_label_values(&["all", &confirmed.to_string()])
+                        .with_label_values(&["all"])
                         .inc();
                 }
 

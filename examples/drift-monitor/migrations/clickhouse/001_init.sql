@@ -4,7 +4,6 @@ USE drift;
 CREATE TABLE IF NOT EXISTS drift_events (
     slot UInt64,
     signature String,
-    confirmed Bool DEFAULT false,
     instruction_data String,
     accounts Array(String),
     liquidation_type Nullable(String),

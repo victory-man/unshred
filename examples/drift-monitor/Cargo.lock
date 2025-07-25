@@ -1396,7 +1396,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
- "bs58",
  "clickhouse",
  "prometheus",
  "rand 0.9.2",

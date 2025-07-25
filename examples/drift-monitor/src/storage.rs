@@ -35,7 +35,6 @@ impl Storage {
 struct ClickHouseEvent {
     slot: u64,
     signature: String,
-    confirmed: bool,
     instruction_data: String,
     accounts: Vec<String>,
     liquidation_type: Option<String>,
@@ -48,7 +47,6 @@ impl From<DriftEvent> for ClickHouseEvent {
         ClickHouseEvent {
             slot: event.slot,
             signature: event.signature,
-            confirmed: event.confirmed,
             instruction_data: event.instruction_data,
             accounts: event.accounts,
             liquidation_type: event.liquidation_type,

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct DriftEvent {
     pub slot: u64,
     pub signature: String,
-    pub confirmed: bool,
     pub instruction_data: String,
     pub accounts: Vec<String>,
     pub liquidation_type: Option<String>,
