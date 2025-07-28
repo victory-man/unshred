@@ -87,6 +87,20 @@ impl<H: TransactionHandler> UnshredProcessorBuilder<H> {
         self
     }
 
+    pub fn num_fec_workers(mut self, num: u8) -> Self {
+        let mut config = self.config.unwrap_or_default();
+        config.num_fec_workers = Some(num);
+        self.config = Some(config);
+        self
+    }
+
+    pub fn num_batch_workers(mut self, num: u8) -> Self {
+        let mut config = self.config.unwrap_or_default();
+        config.num_batch_workers = Some(num);
+        self.config = Some(config);
+        self
+    }
+
     #[cfg(feature = "metrics")]
     /// Sets the Prometheus registry for metrics. `features = ["metrics"]` must be enabled.
     pub fn metrics_registry(mut self, registry: Arc<prometheus::Registry>) -> Self {

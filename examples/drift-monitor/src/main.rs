@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
 
     // Drift handler
     let drift_handler = DriftHandler::new(
-        std::env::var("PROCESSOR_DRIFT_PROGRAM_ID").unwrap(),
+        std::env::var("UNSHRED_DRIFT_PROGRAM_ID").unwrap(),
         event_tx.clone(),
         &registry,
     )?;
@@ -89,14 +89,13 @@ async fn main() -> Result<()> {
         let mut interval = interval(Duration::from_secs(300));
         loop {
             interval.tick().await;
+            let max_table_size: f64 = std::env::var("UNSHRED_MAX_TABLE_SIZE_GB")
+                .unwrap()
+                .parse()
+                .unwrap();
             if let Err(e) = storage
                 .clickhouse
-                .cleanup_slots_by_size(
-                    std::env::var("PROCESSOR_MAX_TABLE_SIZE_GB")
-                        .unwrap()
-                        .parse()
-                        .unwrap(),
-                )
+                .cleanup_slots_by_size(max_table_size)
                 .await
             {
                 error!("ClickHouse cleanup failed: {}", e);
@@ -105,9 +104,20 @@ async fn main() -> Result<()> {
     });
 
     // Start unshred processor
+    let bind_address = std::env::var("UNSHRED_BIND_ADDRESS").unwrap();
+    let num_fec_workers: u8 = std::env::var("UNSHRED_NUM_FEC_WORKERS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let num_batch_workers: u8 = std::env::var("UNSHRED_NUM_BATCH_WORKERS")
+        .unwrap()
+        .parse()
+        .unwrap();
     let processor = UnshredProcessor::builder()
         .handler(drift_handler)
-        .bind_address(std::env::var("RECEIVER_BIND_ADDRESS").unwrap())
+        .bind_address(bind_address)
+        .num_fec_workers(num_fec_workers)
+        .num_batch_workers(num_batch_workers)
         .metrics_registry(registry)
         .build()?;
 

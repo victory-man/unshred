@@ -95,7 +95,11 @@ impl ShredProcessor {
         let processed_fec_sets = Arc::new(DashSet::<(u64, u32)>::new());
 
         // Channels for receiver -> fec workers
-        let num_fec_workers = std::cmp::max(total_cores.saturating_sub(2), 2);
+        let num_fec_workers = match config.num_fec_workers {
+            Some(num) => num,
+            None => total_cores.saturating_sub(2) as u8,
+        };
+        let num_fec_workers = std::cmp::max(num_fec_workers, 1);
         let (shred_senders, shred_receivers): (Vec<_>, Vec<_>) = (0..num_fec_workers)
             .map(|_| tokio::sync::mpsc::channel::<ShredBytesMeta>(10000))
             .unzip();
@@ -129,7 +133,11 @@ impl ShredProcessor {
         }
 
         // Channels for batch dispatch worker -> batch processing workers
-        let num_batch_workers = std::cmp::max(total_cores.saturating_sub(3), 1);
+        let num_batch_workers = match config.num_batch_workers {
+            Some(num) => num,
+            None => total_cores.saturating_sub(3) as u8,
+        };
+        let num_batch_workers = std::cmp::max(num_batch_workers, 1);
         let (batch_senders, batch_receivers): (Vec<_>, Vec<_>) = (0..num_batch_workers)
             .map(|_| tokio::sync::mpsc::channel::<BatchWork>(10000))
             .unzip();
