@@ -32,7 +32,7 @@ make clean # Stop everything and remove volumes
 ```bash
 # Copy env
 cp env.example .env
-# Set variables e.g. `BIND_HOST=0.0.0.0`
+# Set variables
 
 # Build and start everything
 make prod

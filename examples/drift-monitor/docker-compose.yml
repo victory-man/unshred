@@ -6,8 +6,8 @@ services:
     image: drift-monitor:latest
     container_name: drift-monitor
     ports:
-      - "${BIND_HOST:-127.0.0.1}:9090:9090" # Metrics
-      - "${BIND_HOST:-0.0.0.0}:8001:8001/udp"
+      - "127.0.0.1:9090:9090" # Metrics
+      - "0.0.0.0:8001:8001/udp"
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER}
@@ -80,7 +80,7 @@ services:
     image: grafana/grafana:latest
     container_name: drift-grafana
     ports:
-      - "${BIND_HOST:-0.0.0.0}:3000:3000" # Dashboard access
+      - "0.0.0.0:3000:3000" # Dashboard access
     environment:
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_AUTH_BASIC_ENABLED=true

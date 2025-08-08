@@ -40,10 +40,9 @@ async fn main() -> Result<()> {
 
     // Start metrics server
     let registry = Arc::new(Registry::new());
-    let metrics_port: u16 = std::env::var("METRICS_PORT").unwrap().parse().unwrap();
     let metrics_registry = registry.clone();
     let metrics_server_handle =
-        tokio::spawn(async move { serve_metrics(metrics_registry, metrics_port).await });
+        tokio::spawn(async move { serve_metrics(metrics_registry, 9090).await });
 
     let system_cpu_usage = register_int_gauge_vec_with_registry!(
         "system_cpu_usage_percent",
@@ -104,7 +103,6 @@ async fn main() -> Result<()> {
     });
 
     // Start unshred processor
-    let bind_address = std::env::var("UNSHRED_BIND_ADDRESS").unwrap();
     let num_fec_workers: u8 = std::env::var("UNSHRED_NUM_FEC_WORKERS")
         .unwrap()
         .parse()
@@ -115,7 +113,7 @@ async fn main() -> Result<()> {
         .unwrap();
     let processor = UnshredProcessor::builder()
         .handler(drift_handler)
-        .bind_address(bind_address)
+        .bind_address("0.0.0.0:8001")
         .num_fec_workers(num_fec_workers)
         .num_batch_workers(num_batch_workers)
         .metrics_registry(registry)
