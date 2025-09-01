@@ -29,6 +29,7 @@ impl ShredReceiver {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
 
         socket.set_reuse_address(true)?;
+        socket.set_reuse_port(true)?;
         socket.set_recv_buffer_size(RECV_BUFFER_SIZE)?;
         socket.set_nonblocking(true)?;
 
