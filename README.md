@@ -25,7 +25,7 @@ impl TransactionHandler for MyHandler {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let processor = UnshredProcessor::builder()
         .handler(MyHandler)
         .bind_address("0.0.0.0:8001")

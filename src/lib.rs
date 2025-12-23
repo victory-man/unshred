@@ -47,9 +47,9 @@ impl<H: TransactionHandler> UnshredProcessor<H> {
         UnshredProcessorBuilder::new()
     }
 
-    pub async fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         let processor = ShredProcessor::new();
-        processor.run(self.handler, &self.config).await
+        processor.run(self.handler, &self.config)
     }
 }
 

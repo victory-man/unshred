@@ -2,18 +2,19 @@
 use crate::metrics::Metrics;
 use crate::{types::ShredBytesMeta, TransactionEvent, TransactionHandler, UnshredConfig};
 
+use crate::types::ProcessedFecSets;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
 use std::{
     io::Cursor,
+    thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
 // Header offsets
@@ -81,18 +82,17 @@ impl ShredProcessor {
         Self {}
     }
 
-    pub async fn run<H: TransactionHandler>(
-        self,
-        tx_handler: H,
-        config: &UnshredConfig,
-    ) -> Result<()> {
+    pub fn run<H: TransactionHandler>(self, tx_handler: H, config: &UnshredConfig) -> Result<()> {
         let total_cores = num_cpus::get();
         // Channel for fec workers -> batch dispatcher worker
         let (completed_fec_sender, completed_fec_receiver) =
-            tokio::sync::mpsc::channel::<CompletedFecSet>(1000);
+            crossbeam::channel::bounded::<CompletedFecSet>(1000);
 
         // Track processed fec sets for  deduplication
-        let processed_fec_sets = Arc::new(DashSet::<(u64, u32)>::new());
+        let cache = moka::sync::Cache::builder()
+            .time_to_live(Duration::from_secs(60))
+            .build_with_hasher(ahash::RandomState::new());
+        let processed_fec_sets: Arc<ProcessedFecSets> = Arc::new(cache);
 
         // Channels for receiver -> fec workers
         let num_fec_workers = match config.num_fec_workers {
@@ -101,14 +101,15 @@ impl ShredProcessor {
         };
         let num_fec_workers = std::cmp::max(num_fec_workers, 1);
         let (shred_senders, shred_receivers): (Vec<_>, Vec<_>) = (0..num_fec_workers)
-            .map(|_| tokio::sync::mpsc::channel::<ShredBytesMeta>(10000))
+            .map(|_| crossbeam::channel::bounded::<ShredBytesMeta>(10000))
             .unzip();
 
         // Spawn network receiver
         let bind_addr: std::net::SocketAddr = config.bind_address.parse()?;
         let receiver = crate::receiver::ShredReceiver::new(bind_addr)?;
+        let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
         let receiver_handle =
-            tokio::spawn(receiver.run(shred_senders, Arc::clone(&processed_fec_sets)));
+            thread::spawn(move || receiver.run(shred_senders, processed_fec_sets_clone));
 
         // Spawn fec workers
         info!(
@@ -121,10 +122,9 @@ impl ShredProcessor {
             let sender = completed_fec_sender.clone();
             let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
 
-            let handle = tokio::spawn(async move {
+            let handle = thread::spawn(move || {
                 if let Err(e) =
                     Self::run_fec_worker(worker_id, fec_receiver, sender, processed_fec_sets_clone)
-                        .await
                 {
                     error!("FEC worker {} failed: {}", worker_id, e);
                 }
@@ -139,7 +139,7 @@ impl ShredProcessor {
         };
         let num_batch_workers = std::cmp::max(num_batch_workers, 1);
         let (batch_senders, batch_receivers): (Vec<_>, Vec<_>) = (0..num_batch_workers)
-            .map(|_| tokio::sync::mpsc::channel::<BatchWork>(10000))
+            .map(|_| crossbeam::channel::bounded::<BatchWork>(10000))
             .unzip();
 
         // Spawn batch dispatch worker
@@ -148,8 +148,8 @@ impl ShredProcessor {
             let senders = batch_senders.clone();
             let proc = Arc::clone(&processor);
 
-            tokio::spawn(async move {
-                if let Err(e) = proc.dispatch_worker(completed_fec_receiver, senders).await {
+            thread::spawn(move || {
+                if let Err(e) = proc.dispatch_worker(completed_fec_receiver, senders) {
                     error!("Accumulation worker failed: {:?}", e)
                 }
             })
@@ -166,10 +166,8 @@ impl ShredProcessor {
         for (worker_id, batch_receiver) in batch_receivers.into_iter().enumerate() {
             let tx_handler_clone = Arc::clone(&tx_handler);
 
-            let handle = tokio::spawn(async move {
-                if let Err(e) =
-                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone).await
-                {
+            let handle = thread::spawn(move || {
+                if let Err(e) = Self::batch_worker(worker_id, batch_receiver, tx_handler_clone) {
                     error!("Batch worker {} failed: {:?}", worker_id, e);
                 }
             });
@@ -177,24 +175,27 @@ impl ShredProcessor {
         }
 
         // Wait for all workers to complete
-        dispatch_handle.await?;
-        let _ = tokio::time::timeout(Duration::from_secs(5), receiver_handle).await;
+        dispatch_handle.join().unwrap();
+        // let _ = tokio::time::timeout(Duration::from_secs(5), receiver_handle).await;
+        receiver_handle.join().unwrap().unwrap();
         for handle in fec_handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            // let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            handle.join().unwrap();
         }
         drop(batch_senders);
         for handle in batch_handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            // let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            handle.join().unwrap();
         }
 
         Ok(())
     }
 
-    async fn run_fec_worker(
+    fn run_fec_worker(
         worker_id: usize,
-        mut receiver: Receiver<ShredBytesMeta>,
-        sender: Sender<CompletedFecSet>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        mut receiver: crossbeam::channel::Receiver<ShredBytesMeta>,
+        sender: crossbeam::channel::Sender<CompletedFecSet>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         let reed_solomon_cache = Arc::new(ReedSolomonCache::default());
         let mut fec_set_accumulators: HashMap<(u64, u32), FecSetAccumulator> = HashMap::new();
@@ -203,29 +204,30 @@ impl ShredProcessor {
         let mut last_channel_udpate = Instant::now();
 
         loop {
-            match receiver.recv().await {
-                Some(shred_bytes_meta) => {
+            match receiver.recv() {
+                Ok(shred_bytes_meta) => {
                     if let Err(e) = Self::process_fec_shred(
                         shred_bytes_meta,
                         &mut fec_set_accumulators,
                         &sender,
                         &reed_solomon_cache,
                         &processed_fec_sets,
-                    )
-                    .await
-                    {
+                    ) {
                         error!("FEC worker {} error: {:?}", worker_id, e);
                     }
                 }
-                None => {
+                Err(err) => {
                     warn!("FEC worker {} disconnected", worker_id);
                     break;
                 }
             }
 
             #[cfg(feature = "metrics")]
-            if last_channel_udpate.elapsed() > std::time::Duration::from_secs(1) {
-                let capacity_used = receiver.len() as f64 / receiver.capacity() as f64 * 100.0;
+            if last_channel_udpate.elapsed() > std::time::Duration::from_secs(1)
+                && receiver.capacity().is_some()
+            {
+                let capacity_used =
+                    receiver.len() as f64 / receiver.capacity().unwrap() as f64 * 100.0;
 
                 if let Some(metrics) = Metrics::try_get() {
                     metrics
@@ -246,12 +248,12 @@ impl ShredProcessor {
         Ok(())
     }
 
-    async fn process_fec_shred(
+    fn process_fec_shred(
         shred_bytes_meta: ShredBytesMeta,
         fec_set_accumulators: &mut HashMap<(u64, u32), FecSetAccumulator>,
-        sender: &Sender<CompletedFecSet>,
+        sender: &crossbeam::channel::Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.to_vec()) {
             Ok(shred) => shred,
@@ -288,8 +290,7 @@ impl ShredProcessor {
             sender,
             reed_solomon_cache,
             processed_fec_sets,
-        )
-        .await?;
+        )?;
 
         Ok(())
     }
@@ -334,12 +335,12 @@ impl ShredProcessor {
     }
 
     /// Checks if FEC sets are fully reconstructed and sends them to dispatcher if they are
-    async fn check_fec_completion(
+    fn check_fec_completion(
         fec_key: (u64, u32),
         fec_set_accumulators: &mut HashMap<(u64, u32), FecSetAccumulator>,
-        sender: &Sender<CompletedFecSet>,
+        sender: &crossbeam::channel::Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let acc = if let Some(accumulator) = fec_set_accumulators.get_mut(&fec_key) {
             accumulator
@@ -351,7 +352,7 @@ impl ShredProcessor {
         match status {
             ReconstructionStatus::ReadyNatural => {
                 let acc = fec_set_accumulators.remove(&fec_key).unwrap();
-                Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets).await?;
+                Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets)?;
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = Metrics::try_get() {
@@ -362,13 +363,13 @@ impl ShredProcessor {
                 }
             }
             ReconstructionStatus::ReadyRecovery => {
-                if let Err(e) = Self::recover_fec(acc, reed_solomon_cache).await {
+                if let Err(e) = Self::recover_fec(acc, reed_solomon_cache) {
                     error!("FEC Recovery failed unexpectedly: {:?}", e);
                     return Ok(());
                 }
 
                 let acc = fec_set_accumulators.remove(&fec_key).unwrap();
-                Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets).await?;
+                Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets)?;
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = Metrics::try_get() {
@@ -409,7 +410,7 @@ impl ShredProcessor {
         }
     }
 
-    async fn recover_fec(
+    fn recover_fec(
         acc: &mut FecSetAccumulator,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
     ) -> Result<()> {
@@ -455,28 +456,28 @@ impl ShredProcessor {
         Ok(())
     }
 
-    async fn send_completed_fec_set(
+    fn send_completed_fec_set(
         acc: FecSetAccumulator,
-        sender: &Sender<CompletedFecSet>,
+        sender: &crossbeam::channel::Sender<CompletedFecSet>,
         fec_key: (u64, u32),
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let completed_fec_set = CompletedFecSet {
             slot: acc.slot,
             data_shreds: acc.data_shreds,
         };
 
-        sender.send(completed_fec_set).await?;
-        processed_fec_sets.insert(fec_key);
+        sender.send(completed_fec_set)?;
+        processed_fec_sets.insert(fec_key, ());
 
         Ok(())
     }
 
     /// Pulls completed FEC sets, tries to reconstruct batches and dispatch them
-    async fn dispatch_worker(
+    fn dispatch_worker(
         self: Arc<Self>,
-        mut completed_fec_receiver: Receiver<CompletedFecSet>,
-        batch_sender: Vec<Sender<BatchWork>>,
+        mut completed_fec_receiver: crossbeam::channel::Receiver<CompletedFecSet>,
+        batch_sender: Vec<crossbeam::channel::Sender<BatchWork>>,
     ) -> Result<()> {
         let mut slot_accumulators: HashMap<u64, SlotAccumulator> = HashMap::new();
         let mut processed_slots = HashSet::new();
@@ -484,18 +485,15 @@ impl ShredProcessor {
         let mut last_maintenance = Instant::now();
 
         loop {
-            match completed_fec_receiver.recv().await {
-                Some(completed_fec_set) => {
-                    if let Err(e) = self
-                        .accumulate_completed_fec_set(
-                            completed_fec_set,
-                            &mut slot_accumulators,
-                            &processed_slots,
-                            &batch_sender,
-                            &mut next_worker,
-                        )
-                        .await
-                    {
+            match completed_fec_receiver.recv() {
+                Ok(completed_fec_set) => {
+                    if let Err(e) = self.accumulate_completed_fec_set(
+                        completed_fec_set,
+                        &mut slot_accumulators,
+                        &processed_slots,
+                        &batch_sender,
+                        &mut next_worker,
+                    ) {
                         error!("Failed to process completed FEC set: {}", e);
                     }
 
@@ -517,7 +515,7 @@ impl ShredProcessor {
                     }
                 }
 
-                None => {
+                Err(err) => {
                     warn!("FEC accumulation worker: Channel closed");
                     break;
                 }
@@ -527,12 +525,12 @@ impl ShredProcessor {
         Ok(())
     }
 
-    async fn accumulate_completed_fec_set(
+    fn accumulate_completed_fec_set(
         &self,
         completed_fec_set: CompletedFecSet,
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &HashSet<u64>,
-        batch_senders: &[Sender<BatchWork>],
+        batch_senders: &[crossbeam::channel::Sender<BatchWork>],
         next_worker: &mut usize,
     ) -> Result<()> {
         let slot = completed_fec_set.slot;
@@ -554,17 +552,16 @@ impl ShredProcessor {
             accumulator.data_shreds.insert(index, shred_meta);
         }
 
-        self.try_dispatch_complete_batch(accumulator, slot, batch_senders, next_worker)
-            .await?;
+        self.try_dispatch_complete_batch(accumulator, slot, batch_senders, next_worker)?;
 
         Ok(())
     }
 
-    async fn try_dispatch_complete_batch(
+    fn try_dispatch_complete_batch(
         &self,
         accumulator: &mut SlotAccumulator,
         slot: u64,
-        batch_senders: &[Sender<BatchWork>],
+        batch_senders: &[crossbeam::channel::Sender<BatchWork>],
         next_worker: &mut usize,
     ) -> Result<()> {
         let last_processed = accumulator.last_processed_batch_idx.unwrap_or(0);
@@ -623,7 +620,7 @@ impl ShredProcessor {
             };
             let sender = &batch_senders[*next_worker % batch_senders.len()];
             *next_worker += 1;
-            if let Err(e) = sender.send(batch_work).await {
+            if let Err(e) = sender.send(batch_work) {
                 return Err(anyhow::anyhow!("Failed to send batch work: {}", e));
             }
 
@@ -633,28 +630,31 @@ impl ShredProcessor {
         Ok(())
     }
 
-    async fn batch_worker<H: TransactionHandler>(
+    fn batch_worker<H: TransactionHandler>(
         worker_id: usize,
-        mut batch_receiver: Receiver<BatchWork>,
+        mut batch_receiver: crossbeam::channel::Receiver<BatchWork>,
         tx_handler: Arc<H>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let mut last_channel_udpate = std::time::Instant::now();
-        while let Some(batch_work) = batch_receiver.recv().await {
-            if let Err(e) = Self::process_batch_work(batch_work, &tx_handler).await {
+        while let Ok(batch_work) = batch_receiver.recv() {
+            if let Err(e) = Self::process_batch_work(batch_work, &tx_handler) {
                 error!("Batch worker {} failed to process batch: {}", worker_id, e);
             }
 
             // Update metrics periodically
             #[cfg(feature = "metrics")]
-            if last_channel_udpate.elapsed() > std::time::Duration::from_secs(1) {
+            if last_channel_udpate.elapsed() > std::time::Duration::from_secs(1)
+                && batch_receiver.capacity().is_some()
+            {
                 if let Some(metrics) = Metrics::try_get() {
                     metrics
                         .channel_capacity_utilization
                         .with_label_values(&[&format!("accumulator_batch-worker-{}", worker_id)])
                         .set(
-                            (batch_receiver.len() as f64 / batch_receiver.capacity() as f64 * 100.0)
-                                as i64,
+                            (batch_receiver.len() as f64
+                                / batch_receiver.capacity().unwrap() as f64
+                                * 100.0) as i64,
                         );
                 }
 
@@ -665,7 +665,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    async fn process_batch_work<H: TransactionHandler>(
+    fn process_batch_work<H: TransactionHandler>(
         batch_work: BatchWork,
         tx_handler: &Arc<H>,
     ) -> Result<()> {
@@ -678,7 +678,7 @@ impl ShredProcessor {
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
         for entry_meta in entries {
-            Self::process_entry_transactions(batch_work.slot, &entry_meta, tx_handler).await?;
+            Self::process_entry_transactions(batch_work.slot, &entry_meta, tx_handler)?;
         }
 
         Ok(())
@@ -783,7 +783,7 @@ impl ShredProcessor {
         Ok(shred_received_at_micros.get(shred_idx).and_then(|&ts| ts))
     }
 
-    async fn process_entry_transactions<H: TransactionHandler>(
+    fn process_entry_transactions<H: TransactionHandler>(
         slot: u64,
         entry_meta: &EntryMeta,
         handler: &Arc<H>,

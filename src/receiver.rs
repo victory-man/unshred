@@ -1,17 +1,18 @@
 #[cfg(feature = "metrics")]
 use crate::metrics::Metrics;
-use crate::types::ShredBytesMeta;
+use crate::types::{ProcessedFecSets, ShredBytesMeta};
 
 use anyhow::Result;
+use crossbeam::channel::TrySendError;
 use dashmap::DashSet;
 use socket2::{Domain, Socket, Type};
 use std::{
     mem::MaybeUninit,
     net::SocketAddr,
     sync::Arc,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::mpsc::Sender, task};
 use tracing::{error, info};
 
 const SHRED_SIZE: usize = 1228;
@@ -61,10 +62,10 @@ impl ShredReceiver {
         })
     }
 
-    pub async fn run(
+    pub fn run(
         self,
-        senders: Vec<Sender<ShredBytesMeta>>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        senders: Vec<crossbeam::channel::Sender<ShredBytesMeta>>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         // Spawn receiver threads
         let num_receivers = 1;
@@ -76,7 +77,7 @@ impl ShredReceiver {
             let senders = senders.clone();
             let processed_fec_sets = Arc::clone(&processed_fec_sets);
 
-            let handle = task::spawn_blocking(move || {
+            let handle = thread::spawn(move || {
                 if let Err(e) = Self::receive_loop(socket, senders, processed_fec_sets) {
                     error!("Reciever {} failed: {}", i, e);
                 }
@@ -85,7 +86,7 @@ impl ShredReceiver {
         }
 
         for handle in handles {
-            handle.await?;
+            handle.join().unwrap();
         }
 
         Ok(())
@@ -93,8 +94,8 @@ impl ShredReceiver {
 
     fn receive_loop(
         socket: Arc<Socket>,
-        senders: Vec<Sender<ShredBytesMeta>>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        senders: Vec<crossbeam::channel::Sender<ShredBytesMeta>>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let mut last_channel_update = std::time::Instant::now();
@@ -169,8 +170,8 @@ impl ShredReceiver {
     /// Creates ShredBytesMeta and sends through `senders`
     fn process_shred(
         buffer: &[u8],
-        senders: &[Sender<ShredBytesMeta>],
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        senders: &[crossbeam::channel::Sender<ShredBytesMeta>],
+        processed_fec_sets: &ProcessedFecSets,
         received_at_micros: &u64,
     ) -> Result<()> {
         if buffer.len() < 88 {
@@ -192,7 +193,7 @@ impl ShredReceiver {
             u32::from_le_bytes(buffer[OFFSET_FEC_SET_INDEX..OFFSET_FEC_SET_INDEX + 4].try_into()?);
 
         let fec_key = (slot, fec_set_index);
-        if processed_fec_sets.contains(&fec_key) {
+        if processed_fec_sets.contains_key(&fec_key) {
             return Ok(()); // Exit early
         }
 
@@ -205,13 +206,13 @@ impl ShredReceiver {
         };
         match sender.try_send(shred_bytes_meta) {
             Ok(_) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(TrySendError::Full(_)) => {
                 return Err(anyhow::anyhow!("Channel full, backpressure detected"));
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(TrySendError::Disconnected(_)) => {
                 return Err(anyhow::anyhow!("Channel disconnected"));
             }
-        };
+        }
 
         Ok(())
     }
