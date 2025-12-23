@@ -8654,6 +8654,7 @@ dependencies = [
  "solana-entry",
  "solana-ledger",
  "solana-sdk",
+ "tokio",
  "tracing",
 ]
 
