@@ -27,3 +27,4 @@ solana-address = { version = "1.0.0", features = ["atomic", "borsh", "bytemuck",
 tokio = "1.45.1"
 tracing = "0.1.41"
 wincode = { version = "0.2.5", features = ["solana-short-vec", "derive"] }
+moka = { version = "0.12.12", features = ["sync"] }

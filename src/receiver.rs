@@ -1,6 +1,6 @@
 #[cfg(feature = "metrics")]
 use crate::metrics::Metrics;
-use crate::types::ShredBytesMeta;
+use crate::types::{ProcessedFecSets, ShredBytesMeta};
 
 use anyhow::Result;
 use dashmap::DashSet;
@@ -64,7 +64,7 @@ impl ShredReceiver {
     pub async fn run(
         self,
         senders: Vec<Sender<ShredBytesMeta>>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         // Spawn receiver threads
         let num_receivers = 1;
@@ -94,7 +94,7 @@ impl ShredReceiver {
     fn receive_loop(
         socket: Arc<Socket>,
         senders: Vec<Sender<ShredBytesMeta>>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let mut last_channel_update = std::time::Instant::now();
@@ -170,7 +170,7 @@ impl ShredReceiver {
     fn process_shred(
         buffer: &[u8],
         senders: &[Sender<ShredBytesMeta>],
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
         received_at_micros: &u64,
     ) -> Result<()> {
         if buffer.len() < 88 {
@@ -192,7 +192,7 @@ impl ShredReceiver {
             u32::from_le_bytes(buffer[OFFSET_FEC_SET_INDEX..OFFSET_FEC_SET_INDEX + 4].try_into()?);
 
         let fec_key = (slot, fec_set_index);
-        if processed_fec_sets.contains(&fec_key) {
+        if processed_fec_sets.contains_key(&fec_key) {
             return Ok(()); // Exit early
         }
 

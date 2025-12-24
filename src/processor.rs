@@ -15,6 +15,7 @@ use std::{
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
+use crate::types::ProcessedFecSets;
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -92,7 +93,10 @@ impl ShredProcessor {
             tokio::sync::mpsc::channel::<CompletedFecSet>(1000);
 
         // Track processed fec sets for  deduplication
-        let processed_fec_sets = Arc::new(DashSet::<(u64, u32)>::new());
+        let processed_fec_sets: moka::sync::Cache<(u64, u32), (), ahash::RandomState> = moka::sync::Cache::builder()
+            .time_to_live(Duration::from_secs(60))
+            .build_with_hasher(ahash::RandomState::default());
+        let processed_fec_sets = Arc::new(processed_fec_sets);
 
         // Channels for receiver -> fec workers
         let num_fec_workers = match config.num_fec_workers {
@@ -194,7 +198,7 @@ impl ShredProcessor {
         worker_id: usize,
         mut receiver: Receiver<ShredBytesMeta>,
         sender: Sender<CompletedFecSet>,
-        processed_fec_sets: Arc<DashSet<(u64, u32)>>,
+        processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> Result<()> {
         let reed_solomon_cache = Arc::new(ReedSolomonCache::default());
         let mut fec_set_accumulators: HashMap<(u64, u32), FecSetAccumulator> = HashMap::new();
@@ -251,7 +255,7 @@ impl ShredProcessor {
         fec_set_accumulators: &mut HashMap<(u64, u32), FecSetAccumulator>,
         sender: &Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
@@ -339,7 +343,7 @@ impl ShredProcessor {
         fec_set_accumulators: &mut HashMap<(u64, u32), FecSetAccumulator>,
         sender: &Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let acc = if let Some(accumulator) = fec_set_accumulators.get_mut(&fec_key) {
             accumulator
@@ -459,7 +463,7 @@ impl ShredProcessor {
         acc: FecSetAccumulator,
         sender: &Sender<CompletedFecSet>,
         fec_key: (u64, u32),
-        processed_fec_sets: &DashSet<(u64, u32)>,
+        processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
         let completed_fec_set = CompletedFecSet {
             slot: acc.slot,
@@ -467,7 +471,7 @@ impl ShredProcessor {
         };
 
         sender.send(completed_fec_set).await?;
-        processed_fec_sets.insert(fec_key);
+        processed_fec_sets.insert(fec_key, ());
 
         Ok(())
     }
