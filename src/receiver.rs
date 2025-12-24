@@ -14,7 +14,7 @@ use std::{
 use tokio::{sync::mpsc::Sender, task};
 use tracing::{error, info};
 
-const SHRED_SIZE: usize = 1228;
+pub const SHRED_SIZE: usize = 1228;
 const RECV_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64MB
 const OFFSET_SHRED_SLOT: usize = 65;
 const OFFSET_FEC_SET_INDEX: usize = 79;

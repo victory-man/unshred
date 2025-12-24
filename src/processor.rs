@@ -9,13 +9,63 @@ use anyhow::Result;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
-use std::{sync::Arc, time::Duration};
+use std::{mem, sync::Arc, time::Duration};
 use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
+
+// Object pool for ShredMeta to reduce allocation overhead
+struct ShredMetaPool;
+
+// impl ShredMetaPool {
+//     fn new(max_size: usize) -> Self {
+//         Self {
+//             pool: tokio::sync::Mutex::new(Vec::with_capacity(max_size)),
+//             max_size,
+//         }
+//     }
+//
+//     async fn get(&self) -> ShredMeta {
+//         let mut pool = self.pool.lock().await;
+//         pool.pop().unwrap_or_else(|| {
+//             // Create empty ShredMeta - actual shred will be set later
+//             ShredMeta {
+//                 received_at_micros: None,
+//                 // Note: We need to create a dummy shred first, will be replaced immediately
+//                 shred: unsafe { std::mem::zeroed() }, // Temporary, will be replaced
+//             }
+//         })
+//     }
+//
+//     async fn return_obj(&self, mut obj: ShredMeta) {
+//         let mut pool = self.pool.lock().await;
+//         if pool.len() < self.max_size {
+//             // Reset fields and return to pool
+//             obj.received_at_micros = None;
+//             pool.push(obj);
+//         }
+//     }
+// }
+
+impl PoolAllocator<ShredMeta> for ShredMetaPool {
+    fn reset(&self, _obj: &mut ShredMeta) {}
+
+    fn allocate(&self) -> ShredMeta {
+        // Create empty ShredMeta - actual shred will be set later
+        ShredMeta {
+            received_at_micros: None,
+            // Note: We need to create a dummy shred first, will be replaced immediately
+            shred: unsafe { std::mem::zeroed() }, // Temporary, will be replaced
+        }
+    }
+
+    fn is_valid(&self, _obj: &ShredMeta) -> bool {
+        true
+    }
+}
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -36,6 +86,18 @@ struct FecSetAccumulator {
     created_at: Instant,
 }
 
+impl FecSetAccumulator {
+    fn new(slot: u64, expected_shreds: usize) -> Self {
+        Self {
+            slot,
+            data_shreds: HashMap::with_capacity(expected_shreds),
+            code_shreds: HashMap::with_capacity(expected_shreds / 2), // Typically half as many code shreds
+            expected_data_shreds: None,
+            created_at: Instant::now(),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ReconstructionStatus {
     NotReady,
@@ -49,18 +111,31 @@ pub struct BatchWork {
     pub batch_start_idx: u32,
     pub batch_end_idx: u32,
     pub shreds: HashMap<u32, ShredMeta>,
+    pub cached_timestamp: u64, // Cache processing timestamp to reduce system calls
 }
 
+#[derive(Clone)]
 struct CombinedDataMeta {
     combined_data_shred_indices: Vec<usize>,
     combined_data_shred_received_at_micros: Vec<Option<u64>>,
     combined_data: Vec<u8>,
 }
 
+impl CombinedDataMeta {
+    fn with_capacity(shred_count: usize, estimated_data_size: usize) -> Self {
+        Self {
+            combined_data_shred_indices: Vec::with_capacity(shred_count),
+            combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
+            combined_data: Vec::with_capacity(estimated_data_size),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
+#[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
-    pub shred: Shred,
-    pub received_at_micros: Option<u64>,
+    pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
+    pub shred: Option<Shred>,            // Larger field last
 }
 
 #[derive(Debug)]
@@ -75,11 +150,39 @@ pub struct SlotAccumulator {
     created_at: Instant,
 }
 
-pub struct ShredProcessor {}
+impl SlotAccumulator {
+    fn new(expected_shreds: usize) -> Self {
+        Self {
+            data_shreds: HashMap::with_capacity(expected_shreds),
+            last_processed_batch_idx: None,
+            created_at: Instant::now(),
+        }
+    }
+}
+
+use opool::{Pool, PoolAllocator};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub struct ShredProcessor {
+    fec_load_average: Arc<AtomicUsize>,
+    batch_load_average: Arc<AtomicUsize>,
+    shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
+}
+
+impl Default for ShredProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ShredProcessor {
     pub fn new() -> Self {
-        Self {}
+        let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
+        Self {
+            fec_load_average: Arc::new(AtomicUsize::new(0)),
+            batch_load_average: Arc::new(AtomicUsize::new(0)),
+            shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
+        }
     }
 
     pub async fn run<H: TransactionHandler>(
@@ -108,6 +211,15 @@ impl ShredProcessor {
             .map(|_| tokio::sync::mpsc::channel::<ShredBytesMeta>(10000))
             .unzip();
 
+        // Store the count before moving shred_receivers
+        let fec_worker_count = shred_receivers.len();
+
+        // Pre-clone shared resources needed by workers
+        let processor = Arc::new(self);
+        let fec_load_avg = Arc::clone(&processor.fec_load_average);
+        let batch_load_avg = Arc::clone(&processor.batch_load_average);
+        let shred_pool = Arc::clone(&processor.shred_meta_pool);
+
         // Spawn network receiver
         let bind_addr: std::net::SocketAddr = config.bind_address.parse()?;
         let receiver = crate::receiver::ShredReceiver::new(bind_addr)?;
@@ -117,18 +229,25 @@ impl ShredProcessor {
         // Spawn fec workers
         info!(
             "Starting {} fec workers on {} cores",
-            shred_receivers.len(),
-            total_cores
+            fec_worker_count, total_cores
         );
         let mut fec_handles = Vec::new();
         for (worker_id, fec_receiver) in shred_receivers.into_iter().enumerate() {
             let sender = completed_fec_sender.clone();
             let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
+            let load_tracker = Arc::clone(&fec_load_avg);
+            let pool_clone = Arc::clone(&shred_pool);
 
             let handle = tokio::spawn(async move {
-                if let Err(e) =
-                    Self::run_fec_worker(worker_id, fec_receiver, sender, processed_fec_sets_clone)
-                        .await
+                if let Err(e) = Self::run_fec_worker(
+                    worker_id,
+                    fec_receiver,
+                    sender,
+                    processed_fec_sets_clone,
+                    load_tracker,
+                    pool_clone,
+                )
+                .await
                 {
                     error!("FEC worker {} failed: {}", worker_id, e);
                 }
@@ -147,7 +266,6 @@ impl ShredProcessor {
             .unzip();
 
         // Spawn batch dispatch worker
-        let processor = Arc::new(self);
         let dispatch_handle = {
             let senders = batch_senders.clone();
             let proc = Arc::clone(&processor);
@@ -169,10 +287,12 @@ impl ShredProcessor {
         let mut batch_handles = Vec::new();
         for (worker_id, batch_receiver) in batch_receivers.into_iter().enumerate() {
             let tx_handler_clone = Arc::clone(&tx_handler);
+            let load_tracker = Arc::clone(&batch_load_avg);
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone).await
+                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone, load_tracker)
+                        .await
                 {
                     error!("Batch worker {} failed: {:?}", worker_id, e);
                 }
@@ -199,26 +319,47 @@ impl ShredProcessor {
         mut receiver: Receiver<ShredBytesMeta>,
         sender: Sender<CompletedFecSet>,
         processed_fec_sets: Arc<ProcessedFecSets>,
+        load_tracker: Arc<AtomicUsize>,
+        pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
         let reed_solomon_cache = Arc::new(ReedSolomonCache::default());
-        let mut fec_set_accumulators: HashMap<(u64, u32), FecSetAccumulator> = HashMap::new();
+        let mut fec_set_accumulators: HashMap<(u64, u32), FecSetAccumulator> =
+            HashMap::with_capacity(500);
         let mut last_cleanup = Instant::now();
         #[cfg(feature = "metrics")]
         let mut last_channel_udpate = Instant::now();
+        let mut load_samples = Vec::with_capacity(100);
+        let mut last_load_update = Instant::now();
 
         loop {
             match receiver.recv().await {
                 Some(shred_bytes_meta) => {
+                    let process_start = Instant::now();
+
                     if let Err(e) = Self::process_fec_shred(
                         shred_bytes_meta,
                         &mut fec_set_accumulators,
                         &sender,
                         &reed_solomon_cache,
                         &processed_fec_sets,
+                        &pool,
                     )
                     .await
                     {
                         error!("FEC worker {} error: {:?}", worker_id, e);
+                    }
+
+                    let process_duration = process_start.elapsed();
+                    load_samples.push(process_duration.as_nanos() as usize);
+
+                    // Update load average periodically
+                    if last_load_update.elapsed() > Duration::from_secs(1) {
+                        if !load_samples.is_empty() {
+                            let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
+                            load_tracker.store(avg_load, Ordering::Relaxed);
+                            load_samples.clear();
+                        }
+                        last_load_update = Instant::now();
                     }
                 }
                 None => {
@@ -256,6 +397,7 @@ impl ShredProcessor {
         sender: &Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
         processed_fec_sets: &ProcessedFecSets,
+        pool: &Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
         let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
@@ -269,23 +411,15 @@ impl ShredProcessor {
         let fec_set_index = shred.fec_set_index();
         let fec_key = (slot, fec_set_index);
 
-        let accumulator =
-            fec_set_accumulators
-                .entry(fec_key)
-                .or_insert_with(|| FecSetAccumulator {
-                    slot: slot,
-                    data_shreds: HashMap::new(),
-                    code_shreds: HashMap::new(),
-                    expected_data_shreds: None,
-                    created_at: Instant::now(),
-                });
+        let accumulator = fec_set_accumulators
+            .entry(fec_key)
+            .or_insert_with(|| FecSetAccumulator::new(slot, 64));
 
-        let shred_meta = ShredMeta {
-            shred,
-            received_at_micros: shred_bytes_meta.received_at_micros,
-        };
+        let mut shred_meta = pool.get();
+        shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
+        shred_meta.shred = Some(shred);
 
-        Self::store_fec_shred(accumulator, shred_meta)?;
+        Self::store_fec_shred(accumulator, &mut shred_meta)?;
         Self::check_fec_completion(
             fec_key,
             fec_set_accumulators,
@@ -298,18 +432,30 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn store_fec_shred(accumulator: &mut FecSetAccumulator, shred_meta: ShredMeta) -> Result<()> {
-        match shred_meta.shred.shred_type() {
+    fn store_fec_shred(
+        accumulator: &mut FecSetAccumulator,
+        shred_meta: &mut ShredMeta,
+    ) -> Result<()> {
+        let shred = shred_meta.shred.as_ref();
+        if shred.is_none() {
+            return Ok(());
+        }
+        let shred = shred.unwrap();
+        let shred_type = shred.shred_type();
+        let shred_idx = shred.index();
+        match shred_type {
             ShredType::Code => {
-                let payload = shred_meta.shred.payload();
+                let payload = shred.payload();
                 if accumulator.expected_data_shreds.is_none() && payload.len() >= 85 {
                     let expected = u16::from_le_bytes([payload[83], payload[84]]) as usize;
                     accumulator.expected_data_shreds = Some(expected);
                 }
 
-                accumulator
-                    .code_shreds
-                    .insert(shred_meta.shred.index(), shred_meta);
+                let shred_meta = ShredMeta {
+                    received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                    shred: mem::replace(&mut shred_meta.shred, None),
+                };
+                accumulator.code_shreds.insert(shred_idx, shred_meta);
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = Metrics::try_get() {
@@ -320,9 +466,11 @@ impl ShredProcessor {
                 }
             }
             ShredType::Data => {
-                accumulator
-                    .data_shreds
-                    .insert(shred_meta.shred.index(), shred_meta);
+                let shred_meta = ShredMeta {
+                    received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                    shred: mem::replace(&mut shred_meta.shred, None),
+                };
+                accumulator.data_shreds.insert(shred_idx, shred_meta);
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = Metrics::try_get() {
@@ -417,14 +565,20 @@ impl ShredProcessor {
         acc: &mut FecSetAccumulator,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
     ) -> Result<()> {
-        let mut shreds_for_recovery = Vec::new();
+        let mut shreds_for_recovery = Vec::with_capacity(1024);
 
         for (_, shred_meta) in &acc.data_shreds {
-            shreds_for_recovery.push(shred_meta.shred.clone());
+            if shred_meta.shred.is_none() {
+                continue;
+            }
+            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
         }
 
         for (_, shred_meta) in &acc.code_shreds {
-            shreds_for_recovery.push(shred_meta.shred.clone());
+            if shred_meta.shred.is_none() {
+                continue;
+            }
+            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
         }
 
         match solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache) {
@@ -438,7 +592,7 @@ impl ShredProcessor {
                                     acc.data_shreds.insert(
                                         index,
                                         ShredMeta {
-                                            shred: recovered_shred,
+                                            shred: Some(recovered_shred),
                                             received_at_micros: None,
                                         },
                                     );
@@ -482,7 +636,7 @@ impl ShredProcessor {
         mut completed_fec_receiver: Receiver<CompletedFecSet>,
         batch_sender: Vec<Sender<BatchWork>>,
     ) -> Result<()> {
-        let mut slot_accumulators: HashMap<u64, SlotAccumulator> = HashMap::new();
+        let mut slot_accumulators: HashMap<u64, SlotAccumulator> = HashMap::with_capacity(100);
         let mut processed_slots = HashSet::new();
         let mut next_worker = 0usize;
         let mut last_maintenance = Instant::now();
@@ -547,11 +701,7 @@ impl ShredProcessor {
 
         let accumulator = slot_accumulators
             .entry(slot)
-            .or_insert_with(|| SlotAccumulator {
-                data_shreds: HashMap::new(),
-                last_processed_batch_idx: None,
-                created_at: Instant::now(),
-            });
+            .or_insert_with(|| SlotAccumulator::new(128));
 
         // Add all data shreds from completed FEC set
         for (index, shred_meta) in completed_fec_set.data_shreds {
@@ -581,8 +731,13 @@ impl ShredProcessor {
                 if *idx <= last_processed {
                     return None;
                 }
+                if shred_meta.shred.is_none() {
+                    return None;
+                }
+                let shred = shred_meta.shred.as_ref();
+                let shred = shred.unwrap();
 
-                let payload = shred_meta.shred.payload();
+                let payload = shred.payload();
                 if let Some(data_flags) = payload.get(OFFSET_FLAGS) {
                     if (data_flags & 0x40) != 0 {
                         Some(*idx)
@@ -619,11 +774,17 @@ impl ShredProcessor {
             }
 
             // Send
+            let cached_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as u64;
+
             let batch_work = BatchWork {
                 slot,
                 batch_start_idx,
                 batch_end_idx,
                 shreds: batch_shreds,
+                cached_timestamp,
             };
             let sender = &batch_senders[*next_worker % batch_senders.len()];
             *next_worker += 1;
@@ -641,12 +802,30 @@ impl ShredProcessor {
         worker_id: usize,
         mut batch_receiver: Receiver<BatchWork>,
         tx_handler: Arc<H>,
+        load_tracker: Arc<AtomicUsize>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let mut last_channel_udpate = std::time::Instant::now();
+        let mut load_samples = Vec::with_capacity(100);
+        let mut last_load_update = Instant::now();
+
         while let Some(batch_work) = batch_receiver.recv().await {
+            let process_start = Instant::now();
             if let Err(e) = Self::process_batch_work(batch_work, &tx_handler).await {
                 error!("Batch worker {} failed to process batch: {}", worker_id, e);
+            }
+
+            let process_duration = process_start.elapsed();
+            load_samples.push(process_duration.as_nanos() as usize);
+
+            // Update load average periodically
+            if last_load_update.elapsed() > Duration::from_secs(1) {
+                if !load_samples.is_empty() {
+                    let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
+                    load_tracker.store(avg_load, Ordering::Relaxed);
+                    load_samples.clear();
+                }
+                last_load_update = Instant::now();
             }
 
             // Update metrics periodically
@@ -682,7 +861,13 @@ impl ShredProcessor {
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
         for entry_meta in entries {
-            Self::process_entry_transactions(batch_work.slot, &entry_meta, tx_handler).await?;
+            Self::process_entry_transactions(
+                batch_work.slot,
+                &entry_meta,
+                tx_handler,
+                batch_work.cached_timestamp,
+            )
+            .await?;
         }
 
         Ok(())
@@ -694,10 +879,10 @@ impl ShredProcessor {
         end_idx: u32,
     ) -> Result<CombinedDataMeta> {
         // Track what bytes were contributed by what shreds (for timing stats)
-        let mut combined_data = Vec::new();
         let size: usize = (end_idx - start_idx) as usize;
-        let mut combined_data_shred_indices = Vec::with_capacity(size);
-        let mut combined_data_shred_received_at_micros = Vec::with_capacity(size);
+        let estimated_data_size = size * crate::receiver::SHRED_SIZE; // Estimate 1KB per shred average
+
+        let mut result = CombinedDataMeta::with_capacity(size, estimated_data_size);
 
         // Go through shreds in order
         for idx in start_idx..=end_idx {
@@ -705,10 +890,16 @@ impl ShredProcessor {
                 .get(&idx)
                 .ok_or_else(|| anyhow::anyhow!("Missing shred at index {}", idx))?;
 
-            combined_data_shred_received_at_micros.push(shred_meta.received_at_micros);
-            combined_data_shred_indices.push(combined_data.len());
+            result
+                .combined_data_shred_received_at_micros
+                .push(shred_meta.received_at_micros);
+            result
+                .combined_data_shred_indices
+                .push(result.combined_data.len());
 
-            let payload = shred_meta.shred.payload();
+            let shred = shred_meta.shred.as_ref();
+            let shred = shred.unwrap();
+            let payload = shred.payload();
             if payload.len() >= OFFSET_SIZE + 2 {
                 let size_bytes = &payload[OFFSET_SIZE..OFFSET_SIZE + 2];
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
@@ -717,7 +908,7 @@ impl ShredProcessor {
                 if let Some(data) =
                     payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
                 {
-                    combined_data.extend_from_slice(data);
+                    result.combined_data.extend_from_slice(data);
                 } else {
                     return Err(anyhow::anyhow!("Missing data in shred"));
                 }
@@ -725,11 +916,7 @@ impl ShredProcessor {
                 return Err(anyhow::anyhow!("Invalid payload"));
             }
         }
-        Ok(CombinedDataMeta {
-            combined_data,
-            combined_data_shred_indices,
-            combined_data_shred_received_at_micros,
-        })
+        Ok(result)
     }
 
     fn parse_entries_from_batch_data(
@@ -792,16 +979,14 @@ impl ShredProcessor {
         slot: u64,
         entry_meta: &EntryMeta,
         handler: &Arc<H>,
+        cached_timestamp: u64,
     ) -> Result<()> {
         for tx in &entry_meta.entry.transactions {
             let event = TransactionEvent {
                 slot,
                 transaction: tx,
                 received_at_micros: entry_meta.received_at_micros,
-                processed_at_micros: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as u64,
+                processed_at_micros: cached_timestamp, // Use cached timestamp
             };
 
             if let Err(e) = handler.handle_transaction(&event) {
