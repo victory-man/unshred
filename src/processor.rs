@@ -754,10 +754,8 @@ impl ShredProcessor {
             let entry_start_pos = init_reader_len - reader.as_slice().len() + 8;
 
             // match bincode::deserialize_from::<_, Entry>(&mut cursor) {
-            let mut target = MaybeUninit::uninit();
-            match Entry::read(&mut reader, &mut target) {
-                Ok(_) => {
-                    let entry = unsafe { target.assume_init() };
+            match Entry::get(&mut reader) {
+                Ok(entry) => {
                     let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
                         entry_start_pos,
                         shred_indices,
