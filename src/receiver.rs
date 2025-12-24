@@ -192,7 +192,7 @@ impl ShredReceiver {
             u32::from_le_bytes(buffer[OFFSET_FEC_SET_INDEX..OFFSET_FEC_SET_INDEX + 4].try_into()?);
 
         let fec_key = (slot, fec_set_index);
-        if processed_fec_sets.contains_key(&fec_key) {
+        if processed_fec_sets.contains(&fec_key) {
             return Ok(()); // Exit early
         }
 

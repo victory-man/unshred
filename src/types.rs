@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use bytes::Bytes;
+use dashmap::DashSet;
 
 #[derive(Debug, Clone)]
 pub struct ShredBytesMeta {
@@ -7,4 +8,4 @@ pub struct ShredBytesMeta {
     pub received_at_micros: Option<u64>,
 }
 
-pub type ProcessedFecSets = moka::sync::Cache<(u64, u32), (), ahash::RandomState>;
+pub type ProcessedFecSets = DashSet<(u64, u32)>;

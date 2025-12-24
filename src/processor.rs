@@ -2,6 +2,7 @@
 use crate::metrics::Metrics;
 use crate::{types::ShredBytesMeta, TransactionEvent, TransactionHandler, UnshredConfig};
 
+use crate::types::ProcessedFecSets;
 use crate::wincode::EntryProxy;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use anyhow::Result;
@@ -15,7 +16,6 @@ use std::{
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
-use crate::types::ProcessedFecSets;
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -93,10 +93,10 @@ impl ShredProcessor {
             tokio::sync::mpsc::channel::<CompletedFecSet>(1000);
 
         // Track processed fec sets for  deduplication
-        let processed_fec_sets: moka::sync::Cache<(u64, u32), (), ahash::RandomState> = moka::sync::Cache::builder()
-            .time_to_live(Duration::from_secs(60))
-            .build_with_hasher(ahash::RandomState::default());
-        let processed_fec_sets = Arc::new(processed_fec_sets);
+        // let processed_fec_sets: moka::sync::Cache<(u64, u32), (), ahash::RandomState> = moka::sync::Cache::builder()
+        //     .time_to_live(Duration::from_secs(60))
+        //     .build_with_hasher(ahash::RandomState::default());
+        let processed_fec_sets = Arc::new(DashSet::new());
 
         // Channels for receiver -> fec workers
         let num_fec_workers = match config.num_fec_workers {
@@ -471,7 +471,7 @@ impl ShredProcessor {
         };
 
         sender.send(completed_fec_set).await?;
-        processed_fec_sets.insert(fec_key, ());
+        processed_fec_sets.insert(fec_key);
 
         Ok(())
     }
