@@ -15,6 +15,8 @@ use std::{
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
+use wincode::io::Reader;
+use wincode::SchemaRead;
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -253,7 +255,7 @@ impl ShredProcessor {
         reed_solomon_cache: &Arc<ReedSolomonCache>,
         processed_fec_sets: &DashSet<(u64, u32)>,
     ) -> Result<()> {
-        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.to_vec()) {
+        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
             Err(e) => {
                 error!("Failed to parse shred: {}", e);
@@ -739,14 +741,19 @@ impl ShredProcessor {
         let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
         let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        let mut cursor = Cursor::new(&combined_data);
-        cursor.set_position(8);
+        // let mut cursor = Cursor::new(&combined_data);
+        // cursor.set_position(8);
+
+        let init_reader_len = combined_data.len() - 8;
+        let mut reader = Reader::new(&combined_data[8..]);
 
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
-            let entry_start_pos = cursor.position() as usize;
+            // let entry_start_pos = cursor.position() as usize;
+            let entry_start_pos = init_reader_len - reader.as_slice().len() + 8;
 
-            match bincode::deserialize_from::<_, Entry>(&mut cursor) {
+            // match bincode::deserialize_from::<_, Entry>(&mut cursor) {
+            match Entry::get(&mut reader) {
                 Ok(entry) => {
                     let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
                         entry_start_pos,
