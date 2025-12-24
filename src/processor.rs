@@ -58,7 +58,7 @@ impl PoolAllocator<ShredMeta> for ShredMetaPool {
         ShredMeta {
             received_at_micros: None,
             // Note: We need to create a dummy shred first, will be replaced immediately
-            shred: unsafe { std::mem::zeroed() }, // Temporary, will be replaced
+            shred: None, // Temporary, will be replaced
         }
     }
 
