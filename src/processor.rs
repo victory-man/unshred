@@ -2,17 +2,17 @@
 use crate::metrics::Metrics;
 use crate::{types::ShredBytesMeta, TransactionEvent, TransactionHandler, UnshredConfig};
 
+use crate::wincode::EntryProxy;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use anyhow::Result;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
+use std::{sync::Arc, time::Duration};
 use std::{
-    io::Cursor,
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
-use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
@@ -739,15 +739,16 @@ impl ShredProcessor {
         let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
         let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        let mut cursor = Cursor::new(&combined_data);
+        let mut cursor = wincode::io::Cursor::new(&combined_data);
         cursor.set_position(8);
 
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
             let entry_start_pos = cursor.position() as usize;
 
-            match bincode::deserialize_from::<_, Entry>(&mut cursor) {
+            match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
                 Ok(entry) => {
+                    let entry = entry.to_entry();
                     let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
                         entry_start_pos,
                         shred_indices,

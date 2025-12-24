@@ -5,6 +5,7 @@ mod types;
 
 #[cfg(feature = "metrics")]
 mod metrics;
+mod wincode;
 
 #[cfg(feature = "metrics")]
 use std::sync::Arc;
