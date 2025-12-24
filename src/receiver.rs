@@ -200,7 +200,7 @@ impl ShredReceiver {
         let worker_id = (fec_set_index as usize) % senders.len();
         let sender = &senders[worker_id];
         let shred_bytes_meta = ShredBytesMeta {
-            shred_bytes: Arc::new(buffer.to_vec()),
+            shred_bytes: bytes::Bytes::copy_from_slice(buffer),
             received_at_micros: Some(*received_at_micros),
         };
         match sender.try_send(shred_bytes_meta) {

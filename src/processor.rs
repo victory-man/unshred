@@ -253,7 +253,7 @@ impl ShredProcessor {
         reed_solomon_cache: &Arc<ReedSolomonCache>,
         processed_fec_sets: &DashSet<(u64, u32)>,
     ) -> Result<()> {
-        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.to_vec()) {
+        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
             Err(e) => {
                 error!("Failed to parse shred: {}", e);
