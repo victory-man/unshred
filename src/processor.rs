@@ -7,6 +7,7 @@ use anyhow::Result;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
+use std::mem::MaybeUninit;
 use std::{
     io::Cursor,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -16,7 +17,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 use wincode::io::Reader;
-use wincode::SchemaRead;
+use wincode::{Deserialize, SchemaRead};
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -753,8 +754,10 @@ impl ShredProcessor {
             let entry_start_pos = init_reader_len - reader.as_slice().len() + 8;
 
             // match bincode::deserialize_from::<_, Entry>(&mut cursor) {
-            match SchemaRead::<Dst = Entry>::get(&mut reader) {
-                Ok(entry) => {
+            let mut target = MaybeUninit::uninit();
+            match Entry::read(&mut reader, &mut target) {
+                Ok(_) => {
+                    let entry = unsafe { target.assume_init() };
                     let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
                         entry_start_pos,
                         shred_indices,
