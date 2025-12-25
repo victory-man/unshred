@@ -383,7 +383,7 @@ impl ShredProcessor {
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(30) {
-                Self::cleanup_fec_sets(&mut fec_set_accumulators);
+                Self::cleanup_fec_sets(&mut fec_set_accumulators, &processed_fec_sets);
                 last_cleanup = Instant::now();
             }
         }
@@ -1026,10 +1026,16 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn cleanup_fec_sets(fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>) {
+    fn cleanup_fec_sets(fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>, processed_fec_sets: &Arc<ProcessedFecSets>) {
         let now = Instant::now();
         let max_age = Duration::from_secs(30);
-        fec_sets.retain(|_, acc| now.duration_since(acc.created_at) <= max_age);
+        fec_sets.retain(|fec_key, acc| {
+            let is_match = now.duration_since(acc.created_at) <= max_age;
+            if !is_match {
+                processed_fec_sets.remove(fec_key);
+            }
+            is_match
+        });
     }
 
     pub fn cleanup_memory(
