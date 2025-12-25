@@ -618,7 +618,7 @@ impl ShredProcessor {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_millis() as u64;
+                .as_micros() as u64;
 
             // Send
             let batch_work = BatchWork {
