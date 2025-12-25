@@ -118,7 +118,7 @@ pub struct BatchWork {
 struct CombinedDataMeta {
     // combined_data_shred_indices: Vec<usize>,
     // combined_data_shred_received_at_micros: Vec<Option<u64>>,
-    combined_data: Bytes,
+    combined_data: Vec<u8>,
 }
 
 impl CombinedDataMeta {
@@ -126,7 +126,7 @@ impl CombinedDataMeta {
         Self {
             // combined_data_shred_indices: Vec::with_capacity(shred_count),
             // combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
-            combined_data: Bytes::new(),
+            combined_data: Vec::with_capacity(estimated_data_size),
         }
     }
 }
@@ -135,7 +135,7 @@ impl CombinedDataMeta {
 #[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
     // pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
-    pub shred: Option<Shred>, // Larger field last
+    pub shred: Option<Shred>,            // Larger field last
 }
 
 #[derive(Debug)]
@@ -160,7 +160,6 @@ impl SlotAccumulator {
     }
 }
 
-use bytes::Bytes;
 use opool::{Pool, PoolAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -292,7 +291,8 @@ impl ShredProcessor {
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone).await
+                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone)
+                        .await
                 {
                     error!("Batch worker {} failed: {:?}", worker_id, e);
                 }
@@ -334,7 +334,7 @@ impl ShredProcessor {
         loop {
             match receiver.recv().await {
                 Some(shred_bytes_meta) => {
-                    // let process_start = Instant::now();
+                    let process_start = Instant::now();
 
                     if let Err(e) = Self::process_fec_shred(
                         shred_bytes_meta,
@@ -415,7 +415,9 @@ impl ShredProcessor {
             .entry(fec_key)
             .or_insert_with(|| FecSetAccumulator::new(slot, 64));
 
-        let mut shred_meta = ShredMeta { shred: Some(shred) };
+        let mut shred_meta = ShredMeta {
+            shred: Some(shred),
+        };
         // shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
 
         // shred_meta.shred = Some(shred);
@@ -433,7 +435,10 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn store_fec_shred(accumulator: &mut FecSetAccumulator, shred_meta: ShredMeta) -> Result<()> {
+    fn store_fec_shred(
+        accumulator: &mut FecSetAccumulator,
+        shred_meta: ShredMeta,
+    ) -> Result<()> {
         let shred = shred_meta.shred.as_ref();
         if shred.is_none() {
             return Ok(());
@@ -764,8 +769,7 @@ impl ShredProcessor {
             }
 
             // Get batch shreds
-            let mut batch_shreds =
-                HashMap::with_capacity((batch_end_idx - batch_start_idx + 1) as usize);
+            let mut batch_shreds = HashMap::with_capacity((batch_end_idx - batch_start_idx + 1) as usize);
             for idx in batch_start_idx..=batch_end_idx {
                 if let Some(shred_meta) = accumulator.data_shreds.get(&idx) {
                     batch_shreds.insert(idx, shred_meta.clone());
@@ -773,7 +777,9 @@ impl ShredProcessor {
             }
 
             // Send
-            let cached_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+            let cached_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_micros() as u64;
 
             let batch_work = BatchWork {
                 slot,
@@ -855,17 +861,16 @@ impl ShredProcessor {
 
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
-        if let Some(entries) = entries {
-            for entry_meta in entries {
-                Self::process_entry_transactions(
-                    batch_work.slot,
-                    &entry_meta,
-                    tx_handler,
-                    batch_work.cached_timestamp,
-                )
-                .await?;
-            }
+        for entry_meta in entries {
+            Self::process_entry_transactions(
+                batch_work.slot,
+                &entry_meta,
+                tx_handler,
+                batch_work.cached_timestamp,
+            )
+            .await?;
         }
+
         Ok(())
     }
 
@@ -901,19 +906,13 @@ impl ShredProcessor {
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
                 let data_size = total_size.saturating_sub(DATA_OFFSET_PAYLOAD);
 
-                // if let Some(data) =
-                //     payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
-                // {
-                //     result.combined_data.extend_from_slice(data);
-                // } else {
-                //     return Err(anyhow::anyhow!("Missing data in shred"));
-                // }
-                if payload.bytes.len() < DATA_OFFSET_PAYLOAD + data_size {
+                if let Some(data) =
+                    payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
+                {
+                    result.combined_data.extend_from_slice(data);
+                } else {
                     return Err(anyhow::anyhow!("Missing data in shred"));
                 }
-                result.combined_data = payload
-                    .bytes
-                    .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size);
             } else {
                 return Err(anyhow::anyhow!("Invalid payload"));
             }
@@ -923,16 +922,16 @@ impl ShredProcessor {
 
     fn parse_entries_from_batch_data(
         combined_data_meta: CombinedDataMeta,
-    ) -> Result<Option<Vec<EntryMeta>>> {
-        let combined_data = combined_data_meta.combined_data.as_ref();
+    ) -> Result<Vec<EntryMeta>> {
+        let combined_data = combined_data_meta.combined_data;
         if combined_data.len() <= 8 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         // let shred_indices = &combined_data_meta.combined_data_shred_indices;
         // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
         let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        let mut cursor = wincode::io::Cursor::new(combined_data);
+        let mut cursor = wincode::io::Cursor::new(&combined_data);
         cursor.set_position(8);
 
         let mut entries = Vec::with_capacity(entry_count as usize);
@@ -959,22 +958,20 @@ impl ShredProcessor {
             }
         }
 
-        Ok(Some(entries))
+        Ok(entries)
     }
 
-    // fn find_earliest_contributing_shred_timestamp(
-    //     entry_start_pos: usize,
-    //     shred_indices: &[usize],
-    //     shred_received_at_micros: &[Option<u64>],
-    // ) -> Result<Option<u64>> {
-    //     let shred_idx = shred_indices
-    //         .binary_search(&entry_start_pos)
-    //         .unwrap_or_else(|idx| {
-    //             idx - 1 // Entry starts in the middle of the previous shred
-    //         });
-    //
-    //     Ok(shred_received_at_micros.get(shred_idx).and_then(|&ts| ts))
-    // }
+    fn find_earliest_contributing_shred_timestamp(
+        entry_start_pos: usize,
+        shred_indices: &[usize],
+        shred_received_at_micros: &[Option<u64>],
+    ) -> Result<Option<u64>> {
+        let shred_idx = shred_indices.binary_search(&entry_start_pos).unwrap_or_else(|idx| {
+            idx - 1 // Entry starts in the middle of the previous shred
+        });
+
+        Ok(shred_received_at_micros.get(shred_idx).and_then(|&ts| ts))
+    }
 
     async fn process_entry_transactions<H: TransactionHandler>(
         slot: u64,
@@ -1028,10 +1025,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn cleanup_fec_sets(
-        fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>,
-        processed_fec_sets: &Arc<ProcessedFecSets>,
-    ) {
+    fn cleanup_fec_sets(fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>, processed_fec_sets: &Arc<ProcessedFecSets>) {
         let now = Instant::now();
         let max_age = Duration::from_secs(30);
         fec_sets.retain(|fec_key, acc| {
