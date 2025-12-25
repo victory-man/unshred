@@ -104,10 +104,10 @@ impl ShredReceiver {
         loop {
             match socket.recv(&mut buffer) {
                 Ok(size) if size > 0 => {
-                    let received_at_micros = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as u64;
+                    // let received_at_micros = SystemTime::now()
+                    //     .duration_since(UNIX_EPOCH)
+                    //     .unwrap()
+                    //     .as_micros() as u64;
 
                     // SAFETY: socket.recv() guarantees the first `size` bytes are initialized
                     let initialized_data =
@@ -117,7 +117,7 @@ impl ShredReceiver {
                         initialized_data,
                         &senders,
                         &processed_fec_sets,
-                        &received_at_micros,
+                        // &received_at_micros,
                     ) {
                         error!("Receiver failed to process shred: {}", e);
                         #[cfg(feature = "metrics")]
@@ -171,7 +171,7 @@ impl ShredReceiver {
         buffer: &[u8],
         senders: &[Sender<ShredBytesMeta>],
         processed_fec_sets: &ProcessedFecSets,
-        received_at_micros: &u64,
+        // received_at_micros: &u64,
     ) -> Result<()> {
         if buffer.len() < 88 {
             // Minimum shred header size
@@ -201,7 +201,7 @@ impl ShredReceiver {
         let sender = &senders[worker_id];
         let shred_bytes_meta = ShredBytesMeta {
             shred_bytes: bytes::Bytes::copy_from_slice(buffer),
-            received_at_micros: Some(*received_at_micros),
+            // received_at_micros: Some(*received_at_micros),
         };
         match sender.try_send(shred_bytes_meta) {
             Ok(_) => {}

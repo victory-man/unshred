@@ -11,8 +11,14 @@ use wincode::io::Reader;
 use wincode::len::ShortU16Len;
 use wincode::{containers, ReadResult, SchemaRead, SchemaWrite};
 
+// #[derive(Debug, Default, PartialEq, Eq, Clone, SchemaRead)]
+// pub struct ProxyEntries {
+//     #[wincode(with = "Vec<crate::wincode::Entry>")]
+//     pub vec: Vec<solana_entry::entry::Entry>
+// }
+
 #[derive(Debug, Default, PartialEq, Eq, Clone, SchemaRead)]
-pub struct EntryProxy {
+pub struct Entry {
     /// The number of hashes since the previous Entry ID.
     pub num_hashes: u64,
 
@@ -27,7 +33,7 @@ pub struct EntryProxy {
     pub transactions: Vec<solana_sdk::transaction::VersionedTransaction>,
 }
 
-impl EntryProxy {
+impl Entry {
     pub fn to_entry(self) -> solana_entry::entry::Entry {
         unsafe { mem::transmute(self) }
     }
