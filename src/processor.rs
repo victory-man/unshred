@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
 // Object pool for ShredMeta to reduce allocation overhead
-struct ShredMetaPool;
+// struct ShredMetaPool;
 
 // impl ShredMetaPool {
 //     fn new(max_size: usize) -> Self {
@@ -50,22 +50,22 @@ struct ShredMetaPool;
 //     }
 // }
 
-impl PoolAllocator<ShredMeta> for ShredMetaPool {
-    fn reset(&self, _obj: &mut ShredMeta) {}
-
-    fn allocate(&self) -> ShredMeta {
-        // Create empty ShredMeta - actual shred will be set later
-        ShredMeta {
-            // received_at_micros: None,
-            // Note: We need to create a dummy shred first, will be replaced immediately
-            shred: None, // Temporary, will be replaced
-        }
-    }
-
-    fn is_valid(&self, _obj: &ShredMeta) -> bool {
-        true
-    }
-}
+// impl PoolAllocator<ShredMeta> for ShredMetaPool {
+//     fn reset(&self, _obj: &mut ShredMeta) {}
+//
+//     fn allocate(&self) -> ShredMeta {
+//         // Create empty ShredMeta - actual shred will be set later
+//         ShredMeta {
+//             // received_at_micros: None,
+//             // Note: We need to create a dummy shred first, will be replaced immediately
+//             shred: None, // Temporary, will be replaced
+//         }
+//     }
+//
+//     fn is_valid(&self, _obj: &ShredMeta) -> bool {
+//         true
+//     }
+// }
 
 // Header offsets
 const OFFSET_FLAGS: usize = 85;
@@ -166,7 +166,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct ShredProcessor {
     // fec_load_average: Arc<AtomicUsize>,
     // batch_load_average: Arc<AtomicUsize>,
-    shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
+    // shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
 }
 
 impl Default for ShredProcessor {
@@ -177,11 +177,11 @@ impl Default for ShredProcessor {
 
 impl ShredProcessor {
     pub fn new() -> Self {
-        let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
+        // let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
         Self {
             // fec_load_average: Arc::new(AtomicUsize::new(0)),
             // batch_load_average: Arc::new(AtomicUsize::new(0)),
-            shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
+            // shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
         }
     }
 
@@ -218,7 +218,7 @@ impl ShredProcessor {
         let processor = Arc::new(self);
         // let fec_load_avg = Arc::clone(&processor.fec_load_average);
         // let batch_load_avg = Arc::clone(&processor.batch_load_average);
-        let shred_pool = Arc::clone(&processor.shred_meta_pool);
+        // let shred_pool = Arc::clone(&processor.shred_meta_pool);
 
         // Spawn network receiver
         let bind_addr: std::net::SocketAddr = config.bind_address.parse()?;
@@ -236,7 +236,7 @@ impl ShredProcessor {
             let sender = completed_fec_sender.clone();
             let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
             // let load_tracker = Arc::clone(&fec_load_avg);
-            let pool_clone = Arc::clone(&shred_pool);
+            // let pool_clone = Arc::clone(&shred_pool);
 
             let handle = tokio::spawn(async move {
                 if let Err(e) = Self::run_fec_worker(
@@ -245,7 +245,7 @@ impl ShredProcessor {
                     sender,
                     processed_fec_sets_clone,
                     // load_tracker,
-                    pool_clone,
+                    // pool_clone,
                 )
                 .await
                 {
@@ -320,7 +320,7 @@ impl ShredProcessor {
         sender: Sender<CompletedFecSet>,
         processed_fec_sets: Arc<ProcessedFecSets>,
         // load_tracker: Arc<AtomicUsize>,
-        pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
+        // pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
         let reed_solomon_cache = Arc::new(ReedSolomonCache::default());
         let mut fec_set_accumulators: HashMap<(u64, u32), FecSetAccumulator> =
@@ -342,7 +342,7 @@ impl ShredProcessor {
                         &sender,
                         &reed_solomon_cache,
                         &processed_fec_sets,
-                        &pool,
+                        // &pool,
                     )
                     .await
                     {
@@ -397,7 +397,7 @@ impl ShredProcessor {
         sender: &Sender<CompletedFecSet>,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
         processed_fec_sets: &ProcessedFecSets,
-        pool: &Arc<Pool<ShredMetaPool, ShredMeta>>,
+        // pool: &Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
         let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
@@ -415,11 +415,14 @@ impl ShredProcessor {
             .entry(fec_key)
             .or_insert_with(|| FecSetAccumulator::new(slot, 64));
 
-        let mut shred_meta = pool.get();
+        let mut shred_meta = ShredMeta {
+            shred: Some(shred),
+        };
         // shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
-        shred_meta.shred = Some(shred);
 
-        Self::store_fec_shred(accumulator, &mut shred_meta)?;
+        // shred_meta.shred = Some(shred);
+
+        Self::store_fec_shred(accumulator, shred_meta)?;
         Self::check_fec_completion(
             fec_key,
             fec_set_accumulators,
@@ -434,7 +437,7 @@ impl ShredProcessor {
 
     fn store_fec_shred(
         accumulator: &mut FecSetAccumulator,
-        shred_meta: &mut ShredMeta,
+        shred_meta: ShredMeta,
     ) -> Result<()> {
         let shred = shred_meta.shred.as_ref();
         if shred.is_none() {
@@ -451,10 +454,10 @@ impl ShredProcessor {
                     accumulator.expected_data_shreds = Some(expected);
                 }
 
-                let shred_meta = ShredMeta {
-                    // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: mem::replace(&mut shred_meta.shred, None),
-                };
+                // let shred_meta = ShredMeta {
+                //     // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                //     shred: mem::replace(&mut shred_meta.shred, None),
+                // };
                 accumulator.code_shreds.insert(shred_idx, shred_meta);
 
                 #[cfg(feature = "metrics")]
@@ -466,10 +469,10 @@ impl ShredProcessor {
                 }
             }
             ShredType::Data => {
-                let shred_meta = ShredMeta {
-                    // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: mem::replace(&mut shred_meta.shred, None),
-                };
+                // let shred_meta = ShredMeta {
+                //     // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                //     shred: mem::replace(&mut shred_meta.shred, None),
+                // };
                 accumulator.data_shreds.insert(shred_idx, shred_meta);
 
                 #[cfg(feature = "metrics")]
