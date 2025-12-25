@@ -160,7 +160,6 @@ impl SlotAccumulator {
     }
 }
 
-use opool::{Pool, PoolAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ShredProcessor {
