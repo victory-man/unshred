@@ -58,7 +58,7 @@ impl PoolAllocator<ShredMeta> for ShredMetaPool {
         ShredMeta {
             received_at_micros: None,
             // Note: We need to create a dummy shred first, will be replaced immediately
-            shred: unsafe { mem::zeroed() }, // Temporary, will be replaced
+            shred: None, // Temporary, will be replaced
         }
     }
 
@@ -135,7 +135,7 @@ impl CombinedDataMeta {
 #[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
     pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
-    pub shred: Shred,                    // Larger field last
+    pub shred: Option<Shred>,            // Larger field last
 }
 
 #[derive(Debug)]
@@ -247,7 +247,7 @@ impl ShredProcessor {
                     load_tracker,
                     pool_clone,
                 )
-                    .await
+                .await
                 {
                     error!("FEC worker {} failed: {}", worker_id, e);
                 }
@@ -344,7 +344,7 @@ impl ShredProcessor {
                         &processed_fec_sets,
                         &pool,
                     )
-                        .await
+                    .await
                     {
                         error!("FEC worker {} error: {:?}", worker_id, e);
                     }
@@ -417,7 +417,7 @@ impl ShredProcessor {
 
         let mut shred_meta = pool.get();
         shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
-        shred_meta.shred = shred;
+        shred_meta.shred = Some(shred);
 
         Self::store_fec_shred(accumulator, &mut shred_meta)?;
         Self::check_fec_completion(
@@ -427,7 +427,7 @@ impl ShredProcessor {
             reed_solomon_cache,
             processed_fec_sets,
         )
-            .await?;
+        .await?;
 
         Ok(())
     }
@@ -436,11 +436,11 @@ impl ShredProcessor {
         accumulator: &mut FecSetAccumulator,
         shred_meta: &mut ShredMeta,
     ) -> Result<()> {
-        // let shred = shred_meta.shred.as_ref();
-        // if shred.is_none() {
-        //     return Ok(());
-        // }
-        let shred = &shred_meta.shred;
+        let shred = shred_meta.shred.as_ref();
+        if shred.is_none() {
+            return Ok(());
+        }
+        let shred = shred.unwrap();
         let shred_type = shred.shred_type();
         let shred_idx = shred.index();
         match shred_type {
@@ -453,7 +453,7 @@ impl ShredProcessor {
 
                 let shred_meta = ShredMeta {
                     received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: shred_meta.shred.clone(),
+                    shred: mem::replace(&mut shred_meta.shred, None),
                 };
                 accumulator.code_shreds.insert(shred_idx, shred_meta);
 
@@ -468,7 +468,7 @@ impl ShredProcessor {
             ShredType::Data => {
                 let shred_meta = ShredMeta {
                     received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: shred_meta.shred.clone(),
+                    shred: mem::replace(&mut shred_meta.shred, None),
                 };
                 accumulator.data_shreds.insert(shred_idx, shred_meta);
 
@@ -568,11 +568,17 @@ impl ShredProcessor {
         let mut shreds_for_recovery = Vec::with_capacity(1024);
 
         for (_, shred_meta) in &acc.data_shreds {
-            shreds_for_recovery.push(shred_meta.shred.clone());
+            if shred_meta.shred.is_none() {
+                continue;
+            }
+            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
         }
 
         for (_, shred_meta) in &acc.code_shreds {
-            shreds_for_recovery.push(shred_meta.shred.clone());
+            if shred_meta.shred.is_none() {
+                continue;
+            }
+            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
         }
 
         match solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache) {
@@ -586,7 +592,7 @@ impl ShredProcessor {
                                     acc.data_shreds.insert(
                                         index,
                                         ShredMeta {
-                                            shred: recovered_shred,
+                                            shred: Some(recovered_shred),
                                             received_at_micros: None,
                                         },
                                     );
@@ -725,8 +731,13 @@ impl ShredProcessor {
                 if *idx <= last_processed {
                     return None;
                 }
+                if shred_meta.shred.is_none() {
+                    return None;
+                }
+                let shred = shred_meta.shred.as_ref();
+                let shred = shred.unwrap();
 
-                let payload = shred_meta.shred.payload();
+                let payload = shred.payload();
                 if let Some(data_flags) = payload.get(OFFSET_FLAGS) {
                     if (data_flags & 0x40) != 0 {
                         Some(*idx)
@@ -855,7 +866,7 @@ impl ShredProcessor {
                 tx_handler,
                 batch_work.cached_timestamp,
             )
-                .await?;
+            .await?;
         }
 
         Ok(())
@@ -885,7 +896,9 @@ impl ShredProcessor {
                 .combined_data_shred_indices
                 .push(result.combined_data.len());
 
-            let payload = shred_meta.shred.payload();
+            let shred = shred_meta.shred.as_ref();
+            let shred = shred.unwrap();
+            let payload = shred.payload();
             if payload.len() >= OFFSET_SIZE + 2 {
                 let size_bytes = &payload[OFFSET_SIZE..OFFSET_SIZE + 2];
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
