@@ -48,6 +48,7 @@ pub struct BatchWork {
     pub batch_start_idx: u32,
     pub batch_end_idx: u32,
     pub shreds: HashMap<u32, ShredMeta>,
+    pub cache_time: u64,
 }
 
 struct CombinedDataMeta {
@@ -614,12 +615,18 @@ impl ShredProcessor {
                 }
             }
 
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
             // Send
             let batch_work = BatchWork {
                 slot,
                 batch_start_idx,
                 batch_end_idx,
                 shreds: batch_shreds,
+                cache_time: now,
             };
             let sender = &batch_senders[*next_worker % batch_senders.len()];
             *next_worker += 1;
@@ -678,7 +685,13 @@ impl ShredProcessor {
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
         for entry_meta in entries {
-            Self::process_entry_transactions(batch_work.slot, &entry_meta, tx_handler).await?;
+            Self::process_entry_transactions(
+                batch_work.slot,
+                &entry_meta,
+                tx_handler,
+                batch_work.cache_time,
+            )
+            .await?;
         }
 
         Ok(())
@@ -788,16 +801,14 @@ impl ShredProcessor {
         slot: u64,
         entry_meta: &EntryMeta,
         handler: &Arc<H>,
+        processed_at_micros: u64,
     ) -> Result<()> {
         for tx in &entry_meta.entry.transactions {
             let event = TransactionEvent {
                 slot,
                 transaction: tx,
                 received_at_micros: entry_meta.received_at_micros,
-                processed_at_micros: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as u64,
+                processed_at_micros,
             };
 
             if let Err(e) = handler.handle_transaction(&event) {
