@@ -901,19 +901,19 @@ impl ShredProcessor {
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
                 let data_size = total_size.saturating_sub(DATA_OFFSET_PAYLOAD);
 
-                if let Some(data) =
-                    payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
-                {
-                    result.combined_data = Bytes::copy_from_slice(data);
-                } else {
-                    return Err(anyhow::anyhow!("Missing data in shred"));
-                }
-                // if payload.bytes.len() < DATA_OFFSET_PAYLOAD + data_size {
+                // if let Some(data) =
+                //     payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
+                // {
+                //     result.combined_data.extend_from_slice(data);
+                // } else {
                 //     return Err(anyhow::anyhow!("Missing data in shred"));
                 // }
-                // result.combined_data = payload
-                //     .bytes
-                //     .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size);
+                if payload.bytes.len() < DATA_OFFSET_PAYLOAD + data_size {
+                    return Err(anyhow::anyhow!("Missing data in shred"));
+                }
+                result.combined_data = payload
+                    .bytes
+                    .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size);
             } else {
                 return Err(anyhow::anyhow!("Invalid payload"));
             }
