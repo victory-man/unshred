@@ -7,10 +7,9 @@ mod types;
 mod metrics;
 mod wincode;
 
+pub use config::UnshredConfig;
 #[cfg(feature = "metrics")]
 use std::sync::Arc;
-
-pub use config::UnshredConfig;
 
 use anyhow::Result;
 use solana_sdk::transaction::VersionedTransaction;

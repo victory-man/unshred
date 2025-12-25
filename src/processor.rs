@@ -58,7 +58,7 @@ impl PoolAllocator<ShredMeta> for ShredMetaPool {
         ShredMeta {
             received_at_micros: None,
             // Note: We need to create a dummy shred first, will be replaced immediately
-            shred: None, // Temporary, will be replaced
+            shred: unsafe { mem::zeroed() }, // Temporary, will be replaced
         }
     }
 
@@ -135,7 +135,7 @@ impl CombinedDataMeta {
 #[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
     pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
-    pub shred: Option<Shred>,            // Larger field last
+    pub shred: Shred,                    // Larger field last
 }
 
 #[derive(Debug)]
@@ -165,7 +165,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ShredProcessor {
     fec_load_average: Arc<AtomicUsize>,
-    batch_load_average: Arc<AtomicUsize>,
+    // batch_load_average: Arc<AtomicUsize>,
     shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
 }
 
@@ -180,7 +180,7 @@ impl ShredProcessor {
         let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
         Self {
             fec_load_average: Arc::new(AtomicUsize::new(0)),
-            batch_load_average: Arc::new(AtomicUsize::new(0)),
+            // batch_load_average: Arc::new(AtomicUsize::new(0)),
             shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
         }
     }
@@ -217,7 +217,7 @@ impl ShredProcessor {
         // Pre-clone shared resources needed by workers
         let processor = Arc::new(self);
         let fec_load_avg = Arc::clone(&processor.fec_load_average);
-        let batch_load_avg = Arc::clone(&processor.batch_load_average);
+        // let batch_load_avg = Arc::clone(&processor.batch_load_average);
         let shred_pool = Arc::clone(&processor.shred_meta_pool);
 
         // Spawn network receiver
@@ -247,7 +247,7 @@ impl ShredProcessor {
                     load_tracker,
                     pool_clone,
                 )
-                .await
+                    .await
                 {
                     error!("FEC worker {} failed: {}", worker_id, e);
                 }
@@ -287,11 +287,11 @@ impl ShredProcessor {
         let mut batch_handles = Vec::new();
         for (worker_id, batch_receiver) in batch_receivers.into_iter().enumerate() {
             let tx_handler_clone = Arc::clone(&tx_handler);
-            let load_tracker = Arc::clone(&batch_load_avg);
+            // let load_tracker = Arc::clone(&batch_load_avg);
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone, load_tracker)
+                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone)
                         .await
                 {
                     error!("Batch worker {} failed: {:?}", worker_id, e);
@@ -344,7 +344,7 @@ impl ShredProcessor {
                         &processed_fec_sets,
                         &pool,
                     )
-                    .await
+                        .await
                     {
                         error!("FEC worker {} error: {:?}", worker_id, e);
                     }
@@ -417,7 +417,7 @@ impl ShredProcessor {
 
         let mut shred_meta = pool.get();
         shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
-        shred_meta.shred = Some(shred);
+        shred_meta.shred = shred;
 
         Self::store_fec_shred(accumulator, &mut shred_meta)?;
         Self::check_fec_completion(
@@ -427,7 +427,7 @@ impl ShredProcessor {
             reed_solomon_cache,
             processed_fec_sets,
         )
-        .await?;
+            .await?;
 
         Ok(())
     }
@@ -436,11 +436,11 @@ impl ShredProcessor {
         accumulator: &mut FecSetAccumulator,
         shred_meta: &mut ShredMeta,
     ) -> Result<()> {
-        let shred = shred_meta.shred.as_ref();
-        if shred.is_none() {
-            return Ok(());
-        }
-        let shred = shred.unwrap();
+        // let shred = shred_meta.shred.as_ref();
+        // if shred.is_none() {
+        //     return Ok(());
+        // }
+        let shred = &shred_meta.shred;
         let shred_type = shred.shred_type();
         let shred_idx = shred.index();
         match shred_type {
@@ -453,7 +453,7 @@ impl ShredProcessor {
 
                 let shred_meta = ShredMeta {
                     received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: mem::replace(&mut shred_meta.shred, None),
+                    shred: shred_meta.shred.clone(),
                 };
                 accumulator.code_shreds.insert(shred_idx, shred_meta);
 
@@ -468,7 +468,7 @@ impl ShredProcessor {
             ShredType::Data => {
                 let shred_meta = ShredMeta {
                     received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
-                    shred: mem::replace(&mut shred_meta.shred, None),
+                    shred: shred_meta.shred.clone(),
                 };
                 accumulator.data_shreds.insert(shred_idx, shred_meta);
 
@@ -568,17 +568,11 @@ impl ShredProcessor {
         let mut shreds_for_recovery = Vec::with_capacity(1024);
 
         for (_, shred_meta) in &acc.data_shreds {
-            if shred_meta.shred.is_none() {
-                continue;
-            }
-            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
+            shreds_for_recovery.push(shred_meta.shred.clone());
         }
 
         for (_, shred_meta) in &acc.code_shreds {
-            if shred_meta.shred.is_none() {
-                continue;
-            }
-            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
+            shreds_for_recovery.push(shred_meta.shred.clone());
         }
 
         match solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache) {
@@ -592,7 +586,7 @@ impl ShredProcessor {
                                     acc.data_shreds.insert(
                                         index,
                                         ShredMeta {
-                                            shred: Some(recovered_shred),
+                                            shred: recovered_shred,
                                             received_at_micros: None,
                                         },
                                     );
@@ -731,13 +725,8 @@ impl ShredProcessor {
                 if *idx <= last_processed {
                     return None;
                 }
-                if shred_meta.shred.is_none() {
-                    return None;
-                }
-                let shred = shred_meta.shred.as_ref();
-                let shred = shred.unwrap();
 
-                let payload = shred.payload();
+                let payload = shred_meta.shred.payload();
                 if let Some(data_flags) = payload.get(OFFSET_FLAGS) {
                     if (data_flags & 0x40) != 0 {
                         Some(*idx)
@@ -766,7 +755,7 @@ impl ShredProcessor {
             }
 
             // Get batch shreds
-            let mut batch_shreds = HashMap::new();
+            let mut batch_shreds = HashMap::with_capacity((batch_end_idx - batch_start_idx + 1) as usize);
             for idx in batch_start_idx..=batch_end_idx {
                 if let Some(shred_meta) = accumulator.data_shreds.get(&idx) {
                     batch_shreds.insert(idx, shred_meta.clone());
@@ -802,31 +791,30 @@ impl ShredProcessor {
         worker_id: usize,
         mut batch_receiver: Receiver<BatchWork>,
         tx_handler: Arc<H>,
-        load_tracker: Arc<AtomicUsize>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let mut last_channel_udpate = std::time::Instant::now();
-        let mut load_samples = Vec::with_capacity(100);
-        let mut last_load_update = Instant::now();
+        // let mut load_samples = Vec::with_capacity(100);
+        // let mut last_load_update = Instant::now();
 
         while let Some(batch_work) = batch_receiver.recv().await {
-            let process_start = Instant::now();
+            // let process_start = Instant::now();
             if let Err(e) = Self::process_batch_work(batch_work, &tx_handler).await {
                 error!("Batch worker {} failed to process batch: {}", worker_id, e);
             }
 
-            let process_duration = process_start.elapsed();
-            load_samples.push(process_duration.as_nanos() as usize);
+            // let process_duration = process_start.elapsed();
+            // load_samples.push(process_duration.as_nanos() as usize);
 
             // Update load average periodically
-            if last_load_update.elapsed() > Duration::from_secs(1) {
-                if !load_samples.is_empty() {
-                    let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
-                    load_tracker.store(avg_load, Ordering::Relaxed);
-                    load_samples.clear();
-                }
-                last_load_update = Instant::now();
-            }
+            // if last_load_update.elapsed() > Duration::from_secs(1) {
+            //     if !load_samples.is_empty() {
+            //         let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
+            //         load_tracker.store(avg_load, Ordering::Relaxed);
+            //         load_samples.clear();
+            //     }
+            //     last_load_update = Instant::now();
+            // }
 
             // Update metrics periodically
             #[cfg(feature = "metrics")]
@@ -867,7 +855,7 @@ impl ShredProcessor {
                 tx_handler,
                 batch_work.cached_timestamp,
             )
-            .await?;
+                .await?;
         }
 
         Ok(())
@@ -897,9 +885,7 @@ impl ShredProcessor {
                 .combined_data_shred_indices
                 .push(result.combined_data.len());
 
-            let shred = shred_meta.shred.as_ref();
-            let shred = shred.unwrap();
-            let payload = shred.payload();
+            let payload = shred_meta.shred.payload();
             if payload.len() >= OFFSET_SIZE + 2 {
                 let size_bytes = &payload[OFFSET_SIZE..OFFSET_SIZE + 2];
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
