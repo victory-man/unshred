@@ -201,7 +201,7 @@ impl ShredReceiver {
         let sender = &senders[worker_id];
         let shred_bytes_meta = ShredBytesMeta {
             shred_bytes: bytes::Bytes::copy_from_slice(buffer),
-            received_at_micros: Some(*received_at_micros),
+            // received_at_micros: Some(*received_at_micros),
         };
         match sender.try_send(shred_bytes_meta) {
             Ok(_) => {}

@@ -56,7 +56,7 @@ impl PoolAllocator<ShredMeta> for ShredMetaPool {
     fn allocate(&self) -> ShredMeta {
         // Create empty ShredMeta - actual shred will be set later
         ShredMeta {
-            received_at_micros: None,
+            // received_at_micros: None,
             // Note: We need to create a dummy shred first, will be replaced immediately
             shred: None, // Temporary, will be replaced
         }
@@ -116,16 +116,16 @@ pub struct BatchWork {
 
 #[derive(Clone)]
 struct CombinedDataMeta {
-    combined_data_shred_indices: Vec<usize>,
-    combined_data_shred_received_at_micros: Vec<Option<u64>>,
+    // combined_data_shred_indices: Vec<usize>,
+    // combined_data_shred_received_at_micros: Vec<Option<u64>>,
     combined_data: Vec<u8>,
 }
 
 impl CombinedDataMeta {
     fn with_capacity(shred_count: usize, estimated_data_size: usize) -> Self {
         Self {
-            combined_data_shred_indices: Vec::with_capacity(shred_count),
-            combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
+            // combined_data_shred_indices: Vec::with_capacity(shred_count),
+            // combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
             combined_data: Vec::with_capacity(estimated_data_size),
         }
     }
@@ -134,7 +134,7 @@ impl CombinedDataMeta {
 #[derive(Debug, Clone)]
 #[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
-    pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
+    // pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
     pub shred: Option<Shred>,            // Larger field last
 }
 
@@ -416,7 +416,7 @@ impl ShredProcessor {
             .or_insert_with(|| FecSetAccumulator::new(slot, 64));
 
         let mut shred_meta = pool.get();
-        shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
+        // shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
         shred_meta.shred = Some(shred);
 
         Self::store_fec_shred(accumulator, &mut shred_meta)?;
@@ -452,7 +452,7 @@ impl ShredProcessor {
                 }
 
                 let shred_meta = ShredMeta {
-                    received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                    // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
                     shred: mem::replace(&mut shred_meta.shred, None),
                 };
                 accumulator.code_shreds.insert(shred_idx, shred_meta);
@@ -467,7 +467,7 @@ impl ShredProcessor {
             }
             ShredType::Data => {
                 let shred_meta = ShredMeta {
-                    received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
+                    // received_at_micros: mem::replace(&mut shred_meta.received_at_micros, None),
                     shred: mem::replace(&mut shred_meta.shred, None),
                 };
                 accumulator.data_shreds.insert(shred_idx, shred_meta);
@@ -593,7 +593,7 @@ impl ShredProcessor {
                                         index,
                                         ShredMeta {
                                             shred: Some(recovered_shred),
-                                            received_at_micros: None,
+                                            // received_at_micros: None,
                                         },
                                     );
                                 }
@@ -657,7 +657,7 @@ impl ShredProcessor {
                         error!("Failed to process completed FEC set: {}", e);
                     }
 
-                    if last_maintenance.elapsed() > std::time::Duration::from_secs(1) {
+                    if last_maintenance.elapsed() > Duration::from_secs(1) {
                         // Clean up
                         if let Err(e) =
                             Self::cleanup_memory(&mut slot_accumulators, &mut processed_slots)
@@ -775,8 +775,7 @@ impl ShredProcessor {
 
             // Send
             let cached_timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .duration_since(UNIX_EPOCH)?
                 .as_micros() as u64;
 
             let batch_work = BatchWork {
@@ -889,12 +888,12 @@ impl ShredProcessor {
                 .get(&idx)
                 .ok_or_else(|| anyhow::anyhow!("Missing shred at index {}", idx))?;
 
-            result
-                .combined_data_shred_received_at_micros
-                .push(shred_meta.received_at_micros);
-            result
-                .combined_data_shred_indices
-                .push(result.combined_data.len());
+            // result
+            //     .combined_data_shred_received_at_micros
+            //     .push(shred_meta.received_at_micros);
+            // result
+            //     .combined_data_shred_indices
+            //     .push(result.combined_data.len());
 
             let shred = shred_meta.shred.as_ref();
             let shred = shred.unwrap();
@@ -925,8 +924,8 @@ impl ShredProcessor {
         if combined_data.len() <= 8 {
             return Ok(Vec::new());
         }
-        let shred_indices = &combined_data_meta.combined_data_shred_indices;
-        let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
+        // let shred_indices = &combined_data_meta.combined_data_shred_indices;
+        // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
         let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
         let mut cursor = wincode::io::Cursor::new(&combined_data);
@@ -934,20 +933,20 @@ impl ShredProcessor {
 
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
-            let entry_start_pos = cursor.position() as usize;
+            // let entry_start_pos = cursor.position() as usize;
 
             match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
                 Ok(entry) => {
                     let entry = entry.to_entry();
-                    let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
-                        entry_start_pos,
-                        shred_indices,
-                        shred_received_at_micros,
-                    )?;
+                    // let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
+                    //     entry_start_pos,
+                    //     shred_indices,
+                    //     shred_received_at_micros,
+                    // )?;
 
                     entries.push(EntryMeta {
                         entry,
-                        received_at_micros: earliest_timestamp,
+                        received_at_micros: None,
                     });
                 }
                 Err(e) => {
@@ -964,12 +963,9 @@ impl ShredProcessor {
         shred_indices: &[usize],
         shred_received_at_micros: &[Option<u64>],
     ) -> Result<Option<u64>> {
-        let shred_idx = match shred_indices.binary_search(&entry_start_pos) {
-            Ok(idx) => idx, // Entry starts exactly at start of shred
-            Err(idx) => {
-                idx - 1 // Entry starts in the middle of the previous shred
-            }
-        };
+        let shred_idx = shred_indices.binary_search(&entry_start_pos).unwrap_or_else(|idx| {
+            idx - 1 // Entry starts in the middle of the previous shred
+        });
 
         Ok(shred_received_at_micros.get(shred_idx).and_then(|&ts| ts))
     }
