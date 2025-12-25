@@ -159,7 +159,7 @@ impl SlotAccumulator {
     }
 }
 
-use crate::wincode::EntryProxy;
+use crate::wincode::ProxyEntries;
 use bytes::Bytes;
 use opool::{Pool, PoolAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -926,54 +926,54 @@ impl ShredProcessor {
         // let shred_indices = &combined_data_meta.combined_data_shred_indices;
         // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
-        let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
+        // let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
         let mut cursor = wincode::io::Cursor::new(&combined_data);
-        cursor.set_position(8);
+        // cursor.set_position(8);
 
-        let mut entries = Vec::with_capacity(entry_count as usize);
+        // let mut entries = Vec::with_capacity(entry_count as usize);
 
-        // match wincode::deserialize_from::<ProxyEntries>(&mut cursor) {
-        //     Ok(entries) => {
-        //         Ok(entries
-        //             .vec
-        //             .into_iter()
-        //             .map(|entry| {
-        //                 EntryMeta {
-        //                     entry,
-        //                     // received_at_micros: earliest_timestamp,
-        //                     received_at_micros: None,
-        //                 }
-        //             })
-        //             .collect())
-        //     }
-        //     Err(e) => Err(anyhow::anyhow!("Error deserializing entry {:?}", e)),
-        // }
-
-        for _ in 0..entry_count {
-            // let entry_start_pos = cursor.position() as usize;
-
-            match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
-                Ok(entry) => {
-                    // let entry = entry.to_entry();
-                    // let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
-                    //     entry_start_pos,
-                    //     shred_indices,
-                    //     shred_received_at_micros,
-                    // )?;
-
-                    entries.push(EntryMeta {
-                        entry: entry.to_entry(),
-                        // received_at_micros: earliest_timestamp,
-                        received_at_micros: None,
-                    });
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Error deserializing entry {:?}", e));
-                }
+        match wincode::deserialize_from::<ProxyEntries>(&mut cursor) {
+            Ok(entries) => {
+                Ok(entries
+                    .vec
+                    .into_iter()
+                    .map(|entry| {
+                        EntryMeta {
+                            entry,
+                            // received_at_micros: earliest_timestamp,
+                            received_at_micros: None,
+                        }
+                    })
+                    .collect())
             }
+            Err(e) => Err(anyhow::anyhow!("Error deserializing entry {:?}", e)),
         }
 
-        Ok(entries)
+        // for _ in 0..entry_count {
+        //     let entry_start_pos = cursor.position() as usize;
+        //
+        //     match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
+        //         Ok(entry) => {
+        //             let entry = entry.to_entry();
+        //             // let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
+        //             //     entry_start_pos,
+        //             //     shred_indices,
+        //             //     shred_received_at_micros,
+        //             // )?;
+        //
+        //             entries.push(EntryMeta {
+        //                 entry,
+        //                 // received_at_micros: earliest_timestamp,
+        //                 received_at_micros: None,
+        //             });
+        //         }
+        //         Err(e) => {
+        //             return Err(anyhow::anyhow!("Error deserializing entry {:?}", e));
+        //         }
+        //     }
+        // }
+        //
+        // Ok(entries)
     }
 
     fn find_earliest_contributing_shred_timestamp(
