@@ -164,7 +164,7 @@ use opool::{Pool, PoolAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ShredProcessor {
-    fec_load_average: Arc<AtomicUsize>,
+    // fec_load_average: Arc<AtomicUsize>,
     // batch_load_average: Arc<AtomicUsize>,
     shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
 }
@@ -179,7 +179,7 @@ impl ShredProcessor {
     pub fn new() -> Self {
         let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
         Self {
-            fec_load_average: Arc::new(AtomicUsize::new(0)),
+            // fec_load_average: Arc::new(AtomicUsize::new(0)),
             // batch_load_average: Arc::new(AtomicUsize::new(0)),
             shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
         }
@@ -216,7 +216,7 @@ impl ShredProcessor {
 
         // Pre-clone shared resources needed by workers
         let processor = Arc::new(self);
-        let fec_load_avg = Arc::clone(&processor.fec_load_average);
+        // let fec_load_avg = Arc::clone(&processor.fec_load_average);
         // let batch_load_avg = Arc::clone(&processor.batch_load_average);
         let shred_pool = Arc::clone(&processor.shred_meta_pool);
 
@@ -235,7 +235,7 @@ impl ShredProcessor {
         for (worker_id, fec_receiver) in shred_receivers.into_iter().enumerate() {
             let sender = completed_fec_sender.clone();
             let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
-            let load_tracker = Arc::clone(&fec_load_avg);
+            // let load_tracker = Arc::clone(&fec_load_avg);
             let pool_clone = Arc::clone(&shred_pool);
 
             let handle = tokio::spawn(async move {
@@ -244,7 +244,7 @@ impl ShredProcessor {
                     fec_receiver,
                     sender,
                     processed_fec_sets_clone,
-                    load_tracker,
+                    // load_tracker,
                     pool_clone,
                 )
                 .await
@@ -319,7 +319,7 @@ impl ShredProcessor {
         mut receiver: Receiver<ShredBytesMeta>,
         sender: Sender<CompletedFecSet>,
         processed_fec_sets: Arc<ProcessedFecSets>,
-        load_tracker: Arc<AtomicUsize>,
+        // load_tracker: Arc<AtomicUsize>,
         pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
         let reed_solomon_cache = Arc::new(ReedSolomonCache::default());
@@ -328,8 +328,8 @@ impl ShredProcessor {
         let mut last_cleanup = Instant::now();
         #[cfg(feature = "metrics")]
         let mut last_channel_udpate = Instant::now();
-        let mut load_samples = Vec::with_capacity(100);
-        let mut last_load_update = Instant::now();
+        // let mut load_samples = Vec::with_capacity(100);
+        // let mut last_load_update = Instant::now();
 
         loop {
             match receiver.recv().await {
@@ -349,18 +349,18 @@ impl ShredProcessor {
                         error!("FEC worker {} error: {:?}", worker_id, e);
                     }
 
-                    let process_duration = process_start.elapsed();
-                    load_samples.push(process_duration.as_nanos() as usize);
+                    // let process_duration = process_start.elapsed();
+                    // load_samples.push(process_duration.as_nanos() as usize);
 
-                    // Update load average periodically
-                    if last_load_update.elapsed() > Duration::from_secs(1) {
-                        if !load_samples.is_empty() {
-                            let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
-                            load_tracker.store(avg_load, Ordering::Relaxed);
-                            load_samples.clear();
-                        }
-                        last_load_update = Instant::now();
-                    }
+                    // // Update load average periodically
+                    // if last_load_update.elapsed() > Duration::from_secs(1) {
+                    //     if !load_samples.is_empty() {
+                    //         let avg_load = load_samples.iter().sum::<usize>() / load_samples.len();
+                    //         load_tracker.store(avg_load, Ordering::Relaxed);
+                    //         load_samples.clear();
+                    //     }
+                    //     last_load_update = Instant::now();
+                    // }
                 }
                 None => {
                     warn!("FEC worker {} disconnected", worker_id);
