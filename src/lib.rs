@@ -25,7 +25,7 @@ pub struct TransactionEvent<'a> {
     ///
     /// Note: Estimated as the received_at_micros of the data shred that contained
     ///       the first byte of the Entry that contained this transaction.
-    // pub received_at_micros: Option<u64>,
+    pub received_at_micros: Option<u64>,
     pub processed_at_micros: u64,
 }
 
