@@ -11,33 +11,25 @@ use wincode::io::Reader;
 use wincode::len::ShortU16Len;
 use wincode::{containers, ReadResult, SchemaRead, SchemaWrite};
 
-// #[derive(Debug, Default, PartialEq, Eq, Clone, SchemaRead)]
-// pub struct ProxyEntries {
-//     #[wincode(with = "Vec<crate::wincode::Entry>")]
-//     pub vec: Vec<solana_entry::entry::Entry>
-// }
+#[derive(SchemaRead)]
+pub struct ProxyEntries {
+    #[wincode(with = "Vec<crate::wincode::Entry>")]
+    pub vec: Vec<solana_entry::entry::Entry>,
+}
 
-#[derive(Debug, Default, PartialEq, Eq, Clone, SchemaRead)]
+#[derive(SchemaRead)]
+#[wincode(from = "solana_entry::entry::Entry")]
 pub struct Entry {
-    /// The number of hashes since the previous Entry ID.
     pub num_hashes: u64,
-
-    #[wincode(with = "Pod<Hash>")]
-    /// The SHA-256 hash `num_hashes` after the previous Entry ID.
-    pub hash: Hash,
-
-    /// An unordered list of transactions that were observed before the Entry ID was
-    /// generated. They may have been observed before a previous Entry ID but were
-    /// pushed back into this list to ensure deterministic interpretation of the ledger.
-    #[wincode(with = "Vec<crate::wincode::VersionedTransaction>")]
-    pub transactions: Vec<solana_sdk::transaction::VersionedTransaction>,
+    pub hash: Pod<Hash>,
+    pub transactions: containers::Vec<VersionedTransaction>,
 }
 
-impl Entry {
-    pub fn to_entry(self) -> solana_entry::entry::Entry {
-        unsafe { mem::transmute(self) }
-    }
-}
+// impl Entry {
+//     pub fn to_entry(self) -> solana_entry::entry::Entry {
+//         unsafe { mem::transmute(self) }
+//     }
+// }
 
 #[derive(SchemaRead)]
 #[wincode(from = "solana_sdk::message::compiled_instruction::CompiledInstruction")]

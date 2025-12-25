@@ -159,6 +159,7 @@ impl SlotAccumulator {
     }
 }
 
+use crate::wincode::ProxyEntries;
 use bytes::Bytes;
 use opool::{Pool, PoolAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -931,13 +932,14 @@ impl ShredProcessor {
 
         // let mut entries = Vec::with_capacity(entry_count as usize);
 
-        match wincode::deserialize_from::<Vec<crate::wincode::Entry>>(&mut cursor) {
+        match wincode::deserialize_from::<ProxyEntries>(&mut cursor) {
             Ok(entries) => {
                 Ok(entries
+                    .vec
                     .into_iter()
                     .map(|entry| {
                         EntryMeta {
-                            entry: entry.to_entry(),
+                            entry,
                             // received_at_micros: earliest_timestamp,
                             received_at_micros: None,
                         }
@@ -1041,7 +1043,10 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn cleanup_fec_sets(fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>, processed_fec_sets: &Arc<ProcessedFecSets>) {
+    fn cleanup_fec_sets(
+        fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>,
+        processed_fec_sets: &Arc<ProcessedFecSets>,
+    ) {
         let now = Instant::now();
         let max_age = Duration::from_secs(30);
         fec_sets.retain(|fec_key, acc| {
