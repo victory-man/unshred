@@ -115,6 +115,7 @@ impl ShredReceiver {
     }
 
     #[cfg(target_os = "linux")]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn receive_loop_mmsg(
         socket: Arc<Socket>,
         senders: Vec<Sender<ShredBytesMeta>>,
@@ -245,6 +246,7 @@ impl ShredReceiver {
     }
 
     #[cfg(not(target_os = "linux"))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn receive_loop_recv(
         socket: Arc<Socket>,
         senders: Vec<Sender<ShredBytesMeta>>,
@@ -321,6 +323,7 @@ impl ShredReceiver {
     }
 
     /// Creates ShredBytesMeta and sends through `senders`
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn process_shred(
         buffer: &[u8],
         senders: &[Sender<ShredBytesMeta>],
