@@ -6,16 +6,24 @@ use crate::types::ProcessedFecSets;
 use crate::wincode::EntryProxy;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use anyhow::Result;
+use crossbeam::queue::SegQueue;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
 use std::{mem, sync::Arc, time::Duration};
 use std::{
+    sync::Mutex,
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
+
+// 定义需要清理的数据结构
+pub struct SlotAccumulatorCleanup {
+    pub slot: u64,
+    pub accumulator: SlotAccumulator,
+}
 
 // Object pool for ShredMeta to reduce allocation overhead
 // struct ShredMetaPool;
@@ -167,6 +175,35 @@ pub struct ShredProcessor {
     // fec_load_average: Arc<AtomicUsize>,
     // batch_load_average: Arc<AtomicUsize>,
     // shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
+    cleanup_queue: Arc<SegQueue<SlotAccumulatorCleanup>>,
+}
+
+impl ShredProcessor {
+    pub fn new_with_cleanup() -> Self {
+        let cleanup_queue = Arc::new(SegQueue::<SlotAccumulatorCleanup>::new());
+
+        // 启动后台清理线程
+        let queue_clone = Arc::clone(&cleanup_queue);
+        std::thread::spawn(move || {
+            loop {
+                // 处理队列中的清理任务
+                if let Some(cleanup_task) = queue_clone.pop() {
+                    // 释放内存，由于 accumulator 包含较大的 HashMap，所以明确释放它
+                    drop(cleanup_task.accumulator);
+                } else {
+                    // 队列为空，短暂休眠以避免空转消耗 CPU
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
+
+        Self {
+            // fec_load_average: Arc::new(AtomicUsize::new(0)),
+            // batch_load_average: Arc::new(AtomicUsize::new(0)),
+            // shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
+            cleanup_queue,
+        }
+    }
 }
 
 impl Default for ShredProcessor {
@@ -177,12 +214,7 @@ impl Default for ShredProcessor {
 
 impl ShredProcessor {
     pub fn new() -> Self {
-        // let shred_meta_pool = Pool::new(num_cpus::get() * 4, ShredMetaPool);
-        Self {
-            // fec_load_average: Arc::new(AtomicUsize::new(0)),
-            // batch_load_average: Arc::new(AtomicUsize::new(0)),
-            // shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
-        }
+        Self::new_with_cleanup()
     }
 
     pub async fn run<H: TransactionHandler>(
@@ -665,10 +697,12 @@ impl ShredProcessor {
                         }
 
                         if last_maintenance.elapsed() > Duration::from_secs(1) {
-                            // Clean up
-                            if let Err(e) =
-                                Self::cleanup_memory(&mut slot_accumulators, &mut processed_slots)
-                            {
+                            // Clean up - 使用后台清理队列
+                            if let Err(e) = Self::cleanup_memory(
+                                &mut slot_accumulators,
+                                &mut processed_slots,
+                                &self.cleanup_queue,
+                            ) {
                                 error!("Could not clean up memory: {:?}", e)
                             }
 
@@ -1066,17 +1100,30 @@ impl ShredProcessor {
     pub fn cleanup_memory(
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &mut HashSet<u64>,
+        cleanup_queue: &SegQueue<SlotAccumulatorCleanup>,
     ) -> Result<()> {
         let now = Instant::now();
 
-        // 第一阶段：从 slot_accumulators 中直接过滤，避免额外的 Vec 分配
-        slot_accumulators.retain(|slot, acc| {
-            let should_remove = now.duration_since(acc.created_at) > MAX_AGE;
-            if should_remove {
-                processed_slots.remove(&slot);
+        // 第一阶段：从 slot_accumulators 中提取过期项并发送到后台清理队列
+        let mut expired_keys = Vec::with_capacity(100);
+        for (slot, acc) in slot_accumulators.iter() {
+            if now.duration_since(acc.created_at) > MAX_AGE {
+                expired_keys.push(*slot);
             }
-            !should_remove // 保留符合条件的槽
-        });
+        }
+
+        // 将过期的 accumulator 移动到清理队列，同时从主哈希表中移除
+        for slot in expired_keys {
+            if let Some(accumulator) = slot_accumulators.remove(&slot) {
+                processed_slots.remove(&slot);
+                // 将需要清理的 accumulator 发送到后台队列
+                let cleanup_task = SlotAccumulatorCleanup {
+                    slot,
+                    accumulator,
+                };
+                cleanup_queue.push(cleanup_task);
+            }
+        }
         Ok(())
     }
 
