@@ -135,7 +135,7 @@ impl CombinedDataMeta {
 #[repr(C)] // Ensure predictable memory layout
 pub struct ShredMeta {
     // pub received_at_micros: Option<u64>, // Smaller field first for better cache alignment
-    pub shred: Option<Shred>,            // Larger field last
+    pub shred: Option<Shred>, // Larger field last
 }
 
 #[derive(Debug)]
@@ -290,8 +290,7 @@ impl ShredProcessor {
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone)
-                        .await
+                    Self::batch_worker(worker_id, batch_receiver, tx_handler_clone).await
                 {
                     error!("Batch worker {} failed: {:?}", worker_id, e);
                 }
@@ -333,8 +332,7 @@ impl ShredProcessor {
         loop {
             match receiver.recv().await {
                 Some(shred_bytes_meta) => {
-                    let process_start = Instant::now();
-
+                    // let process_start = Instant::now();
                     if let Err(e) = Self::process_fec_shred(
                         shred_bytes_meta,
                         &mut fec_set_accumulators,
@@ -390,6 +388,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn process_fec_shred(
         shred_bytes_meta: ShredBytesMeta,
         fec_set_accumulators: &mut HashMap<(u64, u32), FecSetAccumulator>,
@@ -398,7 +397,10 @@ impl ShredProcessor {
         processed_fec_sets: &ProcessedFecSets,
         // pool: &Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
-        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
+        let shred = hotpath::measure_block!("Shred::new_from_serialized_shred", {
+            Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..))
+        });
+        let shred = match shred {
             Ok(shred) => shred,
             Err(e) => {
                 error!("Failed to parse shred: {}", e);
@@ -410,13 +412,14 @@ impl ShredProcessor {
         let fec_set_index = shred.fec_set_index();
         let fec_key = (slot, fec_set_index);
 
-        let accumulator = fec_set_accumulators
-            .entry(fec_key)
-            .or_insert_with(|| FecSetAccumulator::new(slot, 64));
+        let accumulator =
+            hotpath::measure_block!("process_fec_shred.fec_set_accumulators.entry(fec_key)", {
+                fec_set_accumulators
+                    .entry(fec_key)
+                    .or_insert_with(|| FecSetAccumulator::new(slot, 64))
+            });
 
-        let mut shred_meta = ShredMeta {
-            shred: Some(shred),
-        };
+        let shred_meta = ShredMeta { shred: Some(shred) };
         // shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
 
         // shred_meta.shred = Some(shred);
@@ -434,10 +437,8 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn store_fec_shred(
-        accumulator: &mut FecSetAccumulator,
-        shred_meta: ShredMeta,
-    ) -> Result<()> {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    fn store_fec_shred(accumulator: &mut FecSetAccumulator, shred_meta: ShredMeta) -> Result<()> {
         let shred = shred_meta.shred.as_ref();
         if shred.is_none() {
             return Ok(());
@@ -487,6 +488,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     /// Checks if FEC sets are fully reconstructed and sends them to dispatcher if they are
     async fn check_fec_completion(
         fec_key: (u64, u32),
@@ -615,6 +617,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn send_completed_fec_set(
         acc: FecSetAccumulator,
         sender: &Sender<CompletedFecSet>,
@@ -687,6 +690,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn accumulate_completed_fec_set(
         &self,
         completed_fec_set: CompletedFecSet,
@@ -716,6 +720,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn try_dispatch_complete_batch(
         &self,
         accumulator: &mut SlotAccumulator,
@@ -752,7 +757,9 @@ impl ShredProcessor {
             })
             .collect();
 
-        new_batch_complete_indices.sort_unstable();
+        hotpath::measure_block!("new_batch_complete_indices.sort_unstable()", {
+            new_batch_complete_indices.sort_unstable();
+        });
 
         // Dispatch completed batches
         for batch_end_idx in new_batch_complete_indices {
@@ -768,7 +775,8 @@ impl ShredProcessor {
             }
 
             // Get batch shreds
-            let mut batch_shreds = HashMap::with_capacity((batch_end_idx - batch_start_idx + 1) as usize);
+            let mut batch_shreds =
+                HashMap::with_capacity((batch_end_idx - batch_start_idx + 1) as usize);
             for idx in batch_start_idx..=batch_end_idx {
                 if let Some(shred_meta) = accumulator.data_shreds.get(&idx) {
                     batch_shreds.insert(idx, shred_meta.clone());
@@ -776,9 +784,7 @@ impl ShredProcessor {
             }
 
             // Send
-            let cached_timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_micros() as u64;
+            let cached_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
 
             let batch_work = BatchWork {
                 slot,
@@ -789,7 +795,11 @@ impl ShredProcessor {
             };
             let sender = &batch_senders[*next_worker % batch_senders.len()];
             *next_worker += 1;
-            if let Err(e) = sender.send(batch_work).await {
+            let send_result =
+                hotpath::measure_block!("try_dispatch_complete_batch.sender.send(batch_work)", {
+                    sender.send(batch_work).await
+                });
+            if let Err(e) = send_result {
                 return Err(anyhow::anyhow!("Failed to send batch work: {}", e));
             }
 
@@ -848,6 +858,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn process_batch_work<H: TransactionHandler>(
         batch_work: BatchWork,
         tx_handler: &Arc<H>,
@@ -873,6 +884,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn get_batch_data(
         shreds: &HashMap<u32, ShredMeta>,
         start_idx: u32,
@@ -919,6 +931,7 @@ impl ShredProcessor {
         Ok(result)
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn parse_entries_from_batch_data(
         combined_data_meta: CombinedDataMeta,
     ) -> Result<Vec<EntryMeta>> {
@@ -937,7 +950,10 @@ impl ShredProcessor {
         for _ in 0..entry_count {
             // let entry_start_pos = cursor.position() as usize;
 
-            match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
+            let entry = hotpath::measure_block!("wincode::deserialize_from::<EntryProxy>", {
+                wincode::deserialize_from::<EntryProxy>(&mut cursor)
+            });
+            match entry {
                 Ok(entry) => {
                     let entry = entry.to_entry();
                     // let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
@@ -965,13 +981,16 @@ impl ShredProcessor {
         shred_indices: &[usize],
         shred_received_at_micros: &[Option<u64>],
     ) -> Result<Option<u64>> {
-        let shred_idx = shred_indices.binary_search(&entry_start_pos).unwrap_or_else(|idx| {
-            idx - 1 // Entry starts in the middle of the previous shred
-        });
+        let shred_idx = shred_indices
+            .binary_search(&entry_start_pos)
+            .unwrap_or_else(|idx| {
+                idx - 1 // Entry starts in the middle of the previous shred
+            });
 
         Ok(shred_received_at_micros.get(shred_idx).and_then(|&ts| ts))
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn process_entry_transactions<H: TransactionHandler>(
         slot: u64,
         entry_meta: &EntryMeta,
@@ -1024,7 +1043,11 @@ impl ShredProcessor {
         Ok(())
     }
 
-    fn cleanup_fec_sets(fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>, processed_fec_sets: &Arc<ProcessedFecSets>) {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    fn cleanup_fec_sets(
+        fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>,
+        processed_fec_sets: &Arc<ProcessedFecSets>,
+    ) {
         let now = Instant::now();
         let max_age = Duration::from_secs(30);
         fec_sets.retain(|fec_key, acc| {
@@ -1036,6 +1059,7 @@ impl ShredProcessor {
         });
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn cleanup_memory(
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &mut HashSet<u64>,
