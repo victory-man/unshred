@@ -223,3 +223,4 @@ warp::serve(warp::path("metrics").and(warp::get()).map(move || {
 
 ## Qwen Added Memories
 - 不准运行`cargo test`命令
+- 不允许执行`cargo build`如果你要检查代码正确性请使用`cargo check`

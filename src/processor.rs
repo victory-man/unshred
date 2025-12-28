@@ -25,6 +25,11 @@ pub struct SlotAccumulatorCleanup {
     pub accumulator: SlotAccumulator,
 }
 
+pub struct FecSetAccumulatorCleanup {
+    pub fec_key: (u64, u32),
+    pub accumulator: FecSetAccumulator,
+}
+
 // Object pool for ShredMeta to reduce allocation overhead
 // struct ShredMetaPool;
 
@@ -176,11 +181,13 @@ pub struct ShredProcessor {
     // batch_load_average: Arc<AtomicUsize>,
     // shred_meta_pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
     cleanup_queue: Arc<SegQueue<SlotAccumulatorCleanup>>,
+    fec_cleanup_queue: Arc<SegQueue<FecSetAccumulatorCleanup>>,
 }
 
 impl ShredProcessor {
     pub fn new_with_cleanup() -> Self {
         let cleanup_queue = Arc::new(SegQueue::<SlotAccumulatorCleanup>::new());
+        let fec_cleanup_queue = Arc::new(SegQueue::<FecSetAccumulatorCleanup>::new());
 
         // 启动后台清理线程
         let queue_clone = Arc::clone(&cleanup_queue);
@@ -197,11 +204,27 @@ impl ShredProcessor {
             }
         });
 
+        // 启动第二个后台清理线程处理 FEC 集合
+        let fec_queue_clone = Arc::clone(&fec_cleanup_queue);
+        std::thread::spawn(move || {
+            loop {
+                // 处理队列中的 FEC 清理任务
+                if let Some(cleanup_task) = fec_queue_clone.pop() {
+                    // 释放内存，由于 accumulator 包含较大的 HashMap，所以明确释放它
+                    drop(cleanup_task.accumulator);
+                } else {
+                    // 队列为空，短暂休眠以避免空转消耗 CPU
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
+
         Self {
             // fec_load_average: Arc::new(AtomicUsize::new(0)),
             // batch_load_average: Arc::new(AtomicUsize::new(0)),
             // shred_meta_pool: Arc::new(shred_meta_pool), // Pool of 1000 objects
             cleanup_queue,
+            fec_cleanup_queue,
         }
     }
 }
@@ -267,6 +290,7 @@ impl ShredProcessor {
         for (worker_id, fec_receiver) in shred_receivers.into_iter().enumerate() {
             let sender = completed_fec_sender.clone();
             let processed_fec_sets_clone = Arc::clone(&processed_fec_sets);
+            let fec_cleanup_queue_clone = Arc::clone(&processor.fec_cleanup_queue);
             // let load_tracker = Arc::clone(&fec_load_avg);
             // let pool_clone = Arc::clone(&shred_pool);
 
@@ -276,6 +300,7 @@ impl ShredProcessor {
                     fec_receiver,
                     sender,
                     processed_fec_sets_clone,
+                    fec_cleanup_queue_clone,
                     // load_tracker,
                     // pool_clone,
                 )
@@ -350,6 +375,7 @@ impl ShredProcessor {
         mut receiver: Receiver<ShredBytesMeta>,
         sender: Sender<CompletedFecSet>,
         processed_fec_sets: Arc<ProcessedFecSets>,
+        fec_cleanup_queue: Arc<SegQueue<FecSetAccumulatorCleanup>>,
         // load_tracker: Arc<AtomicUsize>,
         // pool: Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
@@ -413,7 +439,7 @@ impl ShredProcessor {
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(30) {
-                Self::cleanup_fec_sets(&mut fec_set_accumulators, &processed_fec_sets);
+                Self::cleanup_fec_sets(&mut fec_set_accumulators, &processed_fec_sets, &fec_cleanup_queue);
                 last_cleanup = Instant::now();
             }
         }
@@ -1084,16 +1110,31 @@ impl ShredProcessor {
     fn cleanup_fec_sets(
         fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>,
         processed_fec_sets: &Arc<ProcessedFecSets>,
+        fec_cleanup_queue: &SegQueue<FecSetAccumulatorCleanup>,
     ) {
         let now = Instant::now();
         let max_age = Duration::from_secs(30);
-        fec_sets.retain(|fec_key, acc| {
-            let is_match = now.duration_since(acc.created_at) <= max_age;
-            if !is_match {
-                processed_fec_sets.remove(fec_key);
+
+        // 第一阶段：从 fec_sets 中提取过期项并发送到后台清理队列
+        let mut expired_keys = Vec::new();
+        for (fec_key, acc) in fec_sets.iter() {
+            if now.duration_since(acc.created_at) > max_age {
+                expired_keys.push(*fec_key);
             }
-            is_match
-        });
+        }
+
+        // 将过期的 accumulator 移动到清理队列，同时从主哈希表中移除
+        for fec_key in expired_keys {
+            if let Some(accumulator) = fec_sets.remove(&fec_key) {
+                processed_fec_sets.remove(&fec_key);
+                // 将需要清理的 accumulator 发送到后台队列
+                let cleanup_task = FecSetAccumulatorCleanup {
+                    fec_key,
+                    accumulator,
+                };
+                fec_cleanup_queue.push(cleanup_task);
+            }
+        }
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
