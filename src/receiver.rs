@@ -155,93 +155,91 @@ impl ShredReceiver {
             .collect();
 
         loop {
-            // 调用 recvmmsg
-            let fd = socket.as_raw_fd();
-            let num_received = unsafe {
-                libc::recvmmsg(
-                    fd,
-                    mmsg.as_mut_ptr(),
-                    mmsg.len() as ::libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                    std::ptr::null_mut(),
-                )
-            };
-
-            if num_received < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    continue;
-                }
-                error!("recvmmsg error: {}", err);
-                #[cfg(feature = "metrics")]
-                if let Some(metrics) = Metrics::try_get() {
-                    metrics
-                        .errors
-                        .with_label_values(&["receiver", "socket_receive"])
-                        .inc();
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-
-            let num_received = num_received as usize;
-            if num_received == 0 {
-                continue;
-            }
-
-            let received_at_micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u64;
-
-            // 处理每个接收到的消息
-            for i in 0..num_received {
-                let size = mmsg[i].msg_len as usize;
-                if size == 0 {
-                    continue;
-                }
-
-                // SAFETY: recvmmsg 保证了前 `size` 个字节已初始化
-                let initialized_data = unsafe {
-                    std::slice::from_raw_parts(
-                        buffers[i].as_ptr() as *const u8,
-                        size,
+            hotpath::measure_block!("receive_mmsg_loop", {
+                // 调用 recvmmsg
+                let fd = socket.as_raw_fd();
+                let num_received = unsafe {
+                    libc::recvmmsg(
+                        fd,
+                        mmsg.as_mut_ptr(),
+                        mmsg.len() as ::libc::c_uint,
+                        libc::MSG_DONTWAIT,
+                        std::ptr::null_mut(),
                     )
                 };
 
-                if let Err(e) = Self::process_shred(
-                    initialized_data,
-                    &senders,
-                    &processed_fec_sets,
-                    &received_at_micros,
-                ) {
-                    error!("Receiver failed to process shred: {}", e);
+                if num_received < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    error!("recvmmsg error: {}", err);
                     #[cfg(feature = "metrics")]
                     if let Some(metrics) = Metrics::try_get() {
                         metrics
                             .errors
-                            .with_label_values(&["receiver", "process_shred"])
+                            .with_label_values(&["receiver", "socket_receive"])
                             .inc();
                     }
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
                 }
-            }
 
-            // 更新指标
-            #[cfg(feature = "metrics")]
-            if last_channel_update.elapsed() > Duration::from_secs(1) {
-                if let Ok((buf_used, buf_size)) = Self::get_socket_buffer_stats(&socket) {
-                    if buf_size > 0 {
-                        let utilization = (buf_used as f64 / buf_size as f64) * 100.0;
+                let num_received = num_received as usize;
+                if num_received == 0 {
+                    continue;
+                }
+
+                let received_at_micros = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros() as u64;
+
+                // 处理每个接收到的消息
+                for i in 0..num_received {
+                    let size = mmsg[i].msg_len as usize;
+                    if size == 0 {
+                        continue;
+                    }
+
+                    // SAFETY: recvmmsg 保证了前 `size` 个字节已初始化
+                    let initialized_data =
+                        unsafe { std::slice::from_raw_parts(buffers[i].as_ptr() as *const u8, size) };
+
+                    if let Err(e) = Self::process_shred(
+                        initialized_data,
+                        &senders,
+                        &processed_fec_sets,
+                        &received_at_micros,
+                    ) {
+                        error!("Receiver failed to process shred: {}", e);
+                        #[cfg(feature = "metrics")]
                         if let Some(metrics) = Metrics::try_get() {
                             metrics
-                                .receiver_socket_buffer_utilization
-                                .with_label_values(&["receiver"])
-                                .set(utilization as i64)
+                                .errors
+                                .with_label_values(&["receiver", "process_shred"])
+                                .inc();
                         }
                     }
                 }
-                last_channel_update = std::time::Instant::now();
-            }
+
+                // 更新指标
+                #[cfg(feature = "metrics")]
+                if last_channel_update.elapsed() > Duration::from_secs(1) {
+                    if let Ok((buf_used, buf_size)) = Self::get_socket_buffer_stats(&socket) {
+                        if buf_size > 0 {
+                            let utilization = (buf_used as f64 / buf_size as f64) * 100.0;
+                            if let Some(metrics) = Metrics::try_get() {
+                                metrics
+                                    .receiver_socket_buffer_utilization
+                                    .with_label_values(&["receiver"])
+                                    .set(utilization as i64)
+                            }
+                        }
+                    }
+                    last_channel_update = std::time::Instant::now();
+                }
+            });
         }
     }
 
