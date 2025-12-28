@@ -21,12 +21,12 @@ use tracing::{error, info, warn};
 
 // 定义需要清理的数据结构
 pub struct SlotAccumulatorCleanup {
-    pub slot: u64,
+    // pub slot: u64,
     pub accumulator: SlotAccumulator,
 }
 
 pub struct FecSetAccumulatorCleanup {
-    pub fec_key: (u64, u32),
+    // pub fec_key: (u64, u32),
     pub accumulator: FecSetAccumulator,
 }
 
@@ -1129,7 +1129,7 @@ impl ShredProcessor {
                 processed_fec_sets.remove(&fec_key);
                 // 将需要清理的 accumulator 发送到后台队列
                 let cleanup_task = FecSetAccumulatorCleanup {
-                    fec_key,
+                    // fec_key,
                     accumulator,
                 };
                 fec_cleanup_queue.push(cleanup_task);
@@ -1159,7 +1159,7 @@ impl ShredProcessor {
                 processed_slots.remove(&slot);
                 // 将需要清理的 accumulator 发送到后台队列
                 let cleanup_task = SlotAccumulatorCleanup {
-                    slot,
+                    // slot,
                     accumulator,
                 };
                 cleanup_queue.push(cleanup_task);
