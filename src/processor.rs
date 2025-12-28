@@ -650,35 +650,37 @@ impl ShredProcessor {
         loop {
             match completed_fec_receiver.recv().await {
                 Some(completed_fec_set) => {
-                    if let Err(e) = self
-                        .accumulate_completed_fec_set(
-                            completed_fec_set,
-                            &mut slot_accumulators,
-                            &processed_slots,
-                            &batch_sender,
-                            &mut next_worker,
-                        )
-                        .await
-                    {
-                        error!("Failed to process completed FEC set: {}", e);
-                    }
-
-                    if last_maintenance.elapsed() > Duration::from_secs(1) {
-                        // Clean up
-                        if let Err(e) =
-                            Self::cleanup_memory(&mut slot_accumulators, &mut processed_slots)
+                    hotpath::measure_block!("dispatch_worker_loop", {
+                        if let Err(e) = self
+                            .accumulate_completed_fec_set(
+                                completed_fec_set,
+                                &mut slot_accumulators,
+                                &processed_slots,
+                                &batch_sender,
+                                &mut next_worker,
+                            )
+                            .await
                         {
-                            error!("Could not clean up memory: {:?}", e)
+                            error!("Failed to process completed FEC set: {}", e);
                         }
 
-                        // Metrics
-                        #[cfg(feature = "metrics")]
-                        if let Err(e) = Self::update_resource_metrics(&mut slot_accumulators) {
-                            error!("Could not update resource metrics: {:?}", e)
-                        }
+                        if last_maintenance.elapsed() > Duration::from_secs(1) {
+                            // Clean up
+                            if let Err(e) =
+                                Self::cleanup_memory(&mut slot_accumulators, &mut processed_slots)
+                            {
+                                error!("Could not clean up memory: {:?}", e)
+                            }
 
-                        last_maintenance = Instant::now();
-                    }
+                            // Metrics
+                            #[cfg(feature = "metrics")]
+                            if let Err(e) = Self::update_resource_metrics(&mut slot_accumulators) {
+                                error!("Could not update resource metrics: {:?}", e)
+                            }
+
+                            last_maintenance = Instant::now();
+                        }
+                    });
                 }
 
                 None => {
@@ -1059,7 +1061,6 @@ impl ShredProcessor {
             is_match
         });
     }
-
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn cleanup_memory(
