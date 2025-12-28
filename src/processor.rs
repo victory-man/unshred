@@ -264,9 +264,7 @@ impl ShredProcessor {
             .unzip();
 
         // Create shared accumulators for dispatch worker and cleanup task
-        let slot_accumulators = Arc::new(tokio::sync::Mutex::new(
-            HashMap::<u64, SlotAccumulator>::with_capacity(100),
-        ));
+        let slot_accumulators = Arc::new(tokio::sync::Mutex::new(HashMap::<u64, SlotAccumulator>::with_capacity(100)));
         let processed_slots = Arc::new(tokio::sync::Mutex::new(HashSet::<u64>::new()));
 
         // Spawn background cleanup task
@@ -284,15 +282,7 @@ impl ShredProcessor {
             let proc = Arc::clone(&processor);
 
             tokio::spawn(async move {
-                if let Err(e) = proc
-                    .dispatch_worker(
-                        completed_fec_receiver,
-                        senders,
-                        slot_accumulators,
-                        processed_slots,
-                    )
-                    .await
-                {
+                if let Err(e) = proc.dispatch_worker(completed_fec_receiver, senders, slot_accumulators, processed_slots).await {
                     error!("Accumulation worker failed: {:?}", e)
                 }
             })
@@ -671,41 +661,39 @@ impl ShredProcessor {
         loop {
             match completed_fec_receiver.recv().await {
                 Some(completed_fec_set) => {
-                    hotpath::measure_block!("dispatch_worker_loop", {
-                        // Acquire locks for short duration
-                        let mut accumulators = slot_accumulators.lock().await;
-                        let slots = processed_slots.lock().await;
+                    // Acquire locks for short duration
+                    let mut accumulators = slot_accumulators.lock().await;
+                    let slots = processed_slots.lock().await;
 
-                        if let Err(e) = self
-                            .accumulate_completed_fec_set(
-                                completed_fec_set,
-                                &mut accumulators,
-                                &slots,
-                                &batch_sender,
-                                &mut next_worker,
-                            )
-                            .await
-                        {
-                            error!("Failed to process completed FEC set: {}", e);
-                        }
+                    if let Err(e) = self
+                        .accumulate_completed_fec_set(
+                            completed_fec_set,
+                            &mut accumulators,
+                            &slots,
+                            &batch_sender,
+                            &mut next_worker,
+                        )
+                        .await
+                    {
+                        error!("Failed to process completed FEC set: {}", e);
+                    }
 
-                        // Release locks before metrics update
-                        drop(accumulators);
-                        drop(slots);
+                    // Release locks before metrics update
+                    drop(accumulators);
+                    drop(slots);
 
-                        // Update metrics only - cleanup is now background task's responsibility
+                    // Update metrics only - cleanup is now background task's responsibility
+                    #[cfg(feature = "metrics")]
+                    if last_metrics_update.elapsed() > Duration::from_secs(1) {
                         #[cfg(feature = "metrics")]
-                        if last_metrics_update.elapsed() > Duration::from_secs(1) {
-                            #[cfg(feature = "metrics")]
-                            {
-                                let accumulators = slot_accumulators.lock().await;
-                                if let Err(e) = Self::update_resource_metrics(&accumulators) {
-                                    error!("Could not update resource metrics: {:?}", e)
-                                }
+                        {
+                            let accumulators = slot_accumulators.lock().await;
+                            if let Err(e) = Self::update_resource_metrics(&accumulators) {
+                                error!("Could not update resource metrics: {:?}", e)
                             }
-                            last_metrics_update = Instant::now();
                         }
-                    });
+                        last_metrics_update = Instant::now();
+                    }
                 }
 
                 None => {
@@ -1150,6 +1138,7 @@ impl ShredProcessor {
             }
         }
     }
+
 
     /// Cleanup expired slot accumulators from memory.
     /// Note: This function is now deprecated in favor of background_cleanup_task,
