@@ -71,6 +71,7 @@ use tracing::{error, info, warn};
 const OFFSET_FLAGS: usize = 85;
 const OFFSET_SIZE: usize = 86; // Payload total size offset
 const DATA_OFFSET_PAYLOAD: usize = 88;
+const MAX_AGE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct CompletedFecSet {
@@ -1059,31 +1060,22 @@ impl ShredProcessor {
         });
     }
 
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn cleanup_memory(
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &mut HashSet<u64>,
     ) -> Result<()> {
         let now = Instant::now();
-        // Remove old slots from memory
-        // We aren't expecting to get any more shreds for them
-        let max_age = Duration::from_secs(30);
-        let slots_to_remove: Vec<u64> = slot_accumulators
-            .iter()
-            .filter_map(|(slot, acc)| {
-                if now.duration_since(acc.created_at) > max_age {
-                    Some(*slot)
-                } else {
-                    None
-                }
-            })
-            .collect();
 
-        for slot in slots_to_remove {
-            slot_accumulators.remove(&slot);
-            processed_slots.remove(&slot);
-        }
-
+        // 第一阶段：从 slot_accumulators 中直接过滤，避免额外的 Vec 分配
+        slot_accumulators.retain(|slot, acc| {
+            let should_remove = now.duration_since(acc.created_at) > MAX_AGE;
+            if should_remove {
+                processed_slots.remove(&slot);
+            }
+            !should_remove // 保留符合条件的槽
+        });
         Ok(())
     }
 
