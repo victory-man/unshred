@@ -6,7 +6,6 @@ mod types;
 #[cfg(feature = "metrics")]
 mod metrics;
 mod wincode;
-mod buffer_allocator;
 
 pub use config::UnshredConfig;
 #[cfg(feature = "metrics")]
