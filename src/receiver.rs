@@ -102,71 +102,75 @@ impl ShredReceiver {
         let mut buffer = vec![MaybeUninit::<u8>::uninit(); SHRED_SIZE];
 
         loop {
-            match socket.recv(&mut buffer) {
-                Ok(size) if size > 0 => {
-                    let received_at_micros = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as u64;
+            hotpath::measure_block!("receive_loop", {
+                match socket.recv(&mut buffer) {
+                    Ok(size) if size > 0 => {
+                        let received_at_micros = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros() as u64;
 
-                    // SAFETY: socket.recv() guarantees the first `size` bytes are initialized
-                    let initialized_data =
-                        unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, size) };
+                        // SAFETY: socket.recv() guarantees the first `size` bytes are initialized
+                        let initialized_data = unsafe {
+                            std::slice::from_raw_parts(buffer.as_ptr() as *const u8, size)
+                        };
 
-                    if let Err(e) = Self::process_shred(
-                        initialized_data,
-                        &senders,
-                        &processed_fec_sets,
-                        &received_at_micros,
-                    ) {
-                        error!("Receiver failed to process shred: {}", e);
+                        if let Err(e) = Self::process_shred(
+                            initialized_data,
+                            &senders,
+                            &processed_fec_sets,
+                            &received_at_micros,
+                        ) {
+                            error!("Receiver failed to process shred: {}", e);
+                            #[cfg(feature = "metrics")]
+                            if let Some(metrics) = Metrics::try_get() {
+                                metrics
+                                    .errors
+                                    .with_label_values(&["receiver", "process_shred"])
+                                    .inc();
+                            }
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Socket receive error: {}", e);
                         #[cfg(feature = "metrics")]
                         if let Some(metrics) = Metrics::try_get() {
                             metrics
                                 .errors
-                                .with_label_values(&["receiver", "process_shred"])
+                                .with_label_values(&["receiver", "socket_receive"])
                                 .inc();
                         }
+                        std::thread::sleep(Duration::from_millis(1));
                     }
                 }
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    error!("Socket receive error: {}", e);
-                    #[cfg(feature = "metrics")]
-                    if let Some(metrics) = Metrics::try_get() {
-                        metrics
-                            .errors
-                            .with_label_values(&["receiver", "socket_receive"])
-                            .inc();
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
 
-            // Update metrics periodically
-            #[cfg(feature = "metrics")]
-            if last_channel_update.elapsed() > Duration::from_secs(1) {
-                if let Ok((buf_used, buf_size)) = Self::get_socket_buffer_stats(&socket) {
-                    if buf_size > 0 {
-                        let utilization = (buf_used as f64 / buf_size as f64) * 100.0;
-                        if let Some(metrics) = Metrics::try_get() {
-                            metrics
-                                .receiver_socket_buffer_utilization
-                                .with_label_values(&["receiver"])
-                                .set(utilization as i64)
+                // Update metrics periodically
+                #[cfg(feature = "metrics")]
+                if last_channel_update.elapsed() > Duration::from_secs(1) {
+                    if let Ok((buf_used, buf_size)) = Self::get_socket_buffer_stats(&socket) {
+                        if buf_size > 0 {
+                            let utilization = (buf_used as f64 / buf_size as f64) * 100.0;
+                            if let Some(metrics) = Metrics::try_get() {
+                                metrics
+                                    .receiver_socket_buffer_utilization
+                                    .with_label_values(&["receiver"])
+                                    .set(utilization as i64)
+                            }
                         }
                     }
-                }
 
-                last_channel_update = std::time::Instant::now();
-            }
+                    last_channel_update = std::time::Instant::now();
+                }
+            });
         }
     }
 
     /// Creates ShredBytesMeta and sends through `senders`
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn process_shred(
         buffer: &[u8],
         senders: &[Sender<ShredBytesMeta>],
