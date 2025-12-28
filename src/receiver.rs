@@ -63,11 +63,9 @@ impl ShredReceiver {
         socket.bind(&bind_addr.into())?;
         info!("UDP receiver bound to {}", bind_addr);
 
-        let allocator = BufferAllocator::new(256);
-        allocator.fill();
         Ok(Self {
             socket: Arc::new(socket),
-            buffer_allocator: Arc::new(allocator),
+            buffer_allocator: Arc::new(BufferAllocator::new(256)),
         })
     }
 
@@ -142,7 +140,7 @@ impl ShredReceiver {
         Ok(())
     }
 
-    // #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     fn receive_loop_mmsg(
         buffer_allocator: Arc<BufferAllocator>,
         socket: Arc<Socket>,
@@ -240,16 +238,19 @@ impl ShredReceiver {
             //     .as_micros() as u64;
 
             // 处理每个接收到的消息
-            buffers
-                .into_iter()
-                .take(num_received)
-                .enumerate()
-                .for_each(|(i, mut data)| {
-                    let size = mmsg[i].msg_len as usize;
-                    if size == 0 {
-                        return;
-                    }
-                    let initialized_data =  // 截取已经写入的数据长度
+            for i in 0..num_received {
+                let size = mmsg[i].msg_len as usize;
+                if size == 0 {
+                    continue;
+                }
+
+                // // SAFETY: recvmmsg 保证了前 `size` 个字节已初始化
+                // let initialized_data =
+                //     unsafe { std::slice::from_raw_parts(buffers[i].as_ptr() as *const u8, size) };
+
+                // let vec = buffers[i];
+                let initialized_data = buffers.pop().map(|mut data| {
+                    // 截取已经写入的数据长度
                     unsafe {
                         data.set_len(size);
                         // 利用 MaybeUninit<u8> 和 u8 布局相同
@@ -259,7 +260,9 @@ impl ShredReceiver {
                         let initialized_vec = Vec::from_raw_parts(ptr, len, cap);
                         std::mem::forget(data);
                         bytes::Bytes::from(initialized_vec)
-                    };
+                    }
+                });
+                if let Some(initialized_data) = initialized_data {
                     if let Err(e) = Self::process_shred(
                         initialized_data,
                         &senders,
@@ -275,7 +278,8 @@ impl ShredReceiver {
                                 .inc();
                         }
                     }
-                });
+                }
+            }
 
             // 更新指标
             #[cfg(feature = "metrics")]
