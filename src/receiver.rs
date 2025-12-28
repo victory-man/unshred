@@ -2,7 +2,9 @@
 use crate::metrics::Metrics;
 use crate::types::{ProcessedFecSets, ShredBytesMeta};
 
+use crate::buffer_allocator::BufferAllocator;
 use anyhow::Result;
+use crossbeam::utils::Backoff;
 use dashmap::DashSet;
 use socket2::{Domain, Socket, Type};
 use std::{
@@ -21,11 +23,11 @@ const OFFSET_SHRED_SLOT: usize = 65;
 const OFFSET_FEC_SET_INDEX: usize = 79;
 
 // recvmsg 相关配置
-#[cfg(target_os = "linux")]
-const RECV_MMSG_MESSAGES: usize = 256; // 一次接收的消息数量
+pub const RECV_MMSG_MESSAGES: usize = 256; // 一次接收的消息数量
 
 pub struct ShredReceiver {
     socket: Arc<Socket>,
+    buffer_allocator: Arc<BufferAllocator>,
 }
 
 impl ShredReceiver {
@@ -63,6 +65,7 @@ impl ShredReceiver {
 
         Ok(Self {
             socket: Arc::new(socket),
+            buffer_allocator: Arc::new(BufferAllocator::new(256)),
         })
     }
 
@@ -77,17 +80,24 @@ impl ShredReceiver {
         let mut handles = Vec::with_capacity(num_receivers);
 
         for i in 0..num_receivers {
+            let buffer_allocator = self.buffer_allocator.clone();
             let socket = Arc::clone(&self.socket);
             let senders = senders.clone();
             let processed_fec_sets = Arc::clone(&processed_fec_sets);
 
             let handle = task::spawn_blocking(move || {
-                if let Err(e) = Self::receive_loop(socket, senders, processed_fec_sets) {
+                if let Err(e) =
+                    Self::receive_loop(buffer_allocator, socket, senders, processed_fec_sets)
+                {
                     error!("Reciever {} failed: {}", i, e);
                 }
             });
             handles.push(handle);
         }
+
+        let allocator = self.buffer_allocator.clone();
+        let allocator_handle = task::spawn_blocking(move || Self::allocator_loop(allocator));
+        handles.push(allocator_handle);
 
         for handle in handles {
             handle.await?;
@@ -96,7 +106,20 @@ impl ShredReceiver {
         Ok(())
     }
 
+    fn allocator_loop(allocator: Arc<BufferAllocator>) {
+        let backoff = Backoff::new();
+        loop {
+            let full = allocator.fill();
+            if full {
+                backoff.snooze();
+            } else {
+                backoff.reset()
+            }
+        }
+    }
+
     fn receive_loop(
+        buffer_allocator: Arc<BufferAllocator>,
         socket: Arc<Socket>,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
@@ -106,10 +129,13 @@ impl ShredReceiver {
 
         // 使用 recvmmsg（Linux）或普通 recv（非 Linux）
         #[cfg(target_os = "linux")]
-        Self::receive_loop_mmsg(socket, senders, processed_fec_sets)?;
+        Self::receive_loop_mmsg(buffer_allocator, socket, senders, processed_fec_sets)?;
 
         #[cfg(not(target_os = "linux"))]
-        Self::receive_loop_recv(socket, senders, processed_fec_sets)?;
+        // Self::receive_loop_recv(socket, senders, processed_fec_sets)?;
+        {
+            panic!("not supported on this platform");
+        }
 
         Ok(())
     }
@@ -117,6 +143,7 @@ impl ShredReceiver {
     #[cfg(target_os = "linux")]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn receive_loop_mmsg(
+        buffer_allocator: Arc<BufferAllocator>,
         socket: Arc<Socket>,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
@@ -124,15 +151,14 @@ impl ShredReceiver {
         #[cfg(feature = "metrics")]
         let mut last_channel_update = std::time::Instant::now();
 
-        // 预分配多个缓冲区用于 recvmmsg
-        let mut buffers: Vec<Vec<MaybeUninit<u8>>> = (0..RECV_MMSG_MESSAGES)
-            .map(|_| vec![MaybeUninit::<u8>::uninit(); SHRED_SIZE])
-            .collect();
-
-        let mut iovecs: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        // // 预分配多个缓冲区用于 recvmmsg
+        // let mut buffers: Vec<Vec<MaybeUninit<u8>>> = (0..RECV_MMSG_MESSAGES)
+        //     .map(|_| vec![MaybeUninit::<u8>::uninit(); SHRED_SIZE])
+        //     .collect();
+        //
+        let mut iovecs: Vec<libc::iovec> = (0..RECV_MMSG_MESSAGES)
+            .map(|_| libc::iovec {
+                iov_base: std::ptr::null_mut(),
                 iov_len: SHRED_SIZE,
             })
             .collect();
@@ -154,7 +180,19 @@ impl ShredReceiver {
             })
             .collect();
 
+        let backoff = Backoff::new();
+
         loop {
+            //获取缓冲区
+            let mut buffers = buffer_allocator.allocate();
+            // 指针指向新内存
+            buffers
+                .iter_mut()
+                .zip(iovecs.iter_mut())
+                .for_each(|(buffer, iovec)| {
+                    iovec.iov_base = buffer.as_mut_ptr() as *mut libc::c_void;
+                });
+
             // 调用 recvmmsg
             let fd = socket.as_raw_fd();
             let num_received = unsafe {
@@ -180,19 +218,25 @@ impl ShredReceiver {
                         .with_label_values(&["receiver", "socket_receive"])
                         .inc();
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                // std::thread::sleep(Duration::from_millis(1));
+                backoff.snooze();
                 continue;
             }
+            if num_received == 0 {
+                // 归还内存，继续复用
+                buffer_allocator.reuse_buffer(buffers);
+                backoff.snooze();
+                continue;
+            }
+            // 重置backoff
+            backoff.reset();
 
             let num_received = num_received as usize;
-            if num_received == 0 {
-                continue;
-            }
 
-            let received_at_micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u64;
+            // let received_at_micros = SystemTime::now()
+            //     .duration_since(UNIX_EPOCH)
+            //     .unwrap()
+            //     .as_micros() as u64;
 
             // 处理每个接收到的消息
             for i in 0..num_received {
@@ -201,27 +245,39 @@ impl ShredReceiver {
                     continue;
                 }
 
-                // SAFETY: recvmmsg 保证了前 `size` 个字节已初始化
-                let initialized_data = unsafe {
-                    std::slice::from_raw_parts(
-                        buffers[i].as_ptr() as *const u8,
-                        size,
-                    )
-                };
+                // // SAFETY: recvmmsg 保证了前 `size` 个字节已初始化
+                // let initialized_data =
+                //     unsafe { std::slice::from_raw_parts(buffers[i].as_ptr() as *const u8, size) };
 
-                if let Err(e) = Self::process_shred(
-                    initialized_data,
-                    &senders,
-                    &processed_fec_sets,
-                    &received_at_micros,
-                ) {
-                    error!("Receiver failed to process shred: {}", e);
-                    #[cfg(feature = "metrics")]
-                    if let Some(metrics) = Metrics::try_get() {
-                        metrics
-                            .errors
-                            .with_label_values(&["receiver", "process_shred"])
-                            .inc();
+                // let vec = buffers[i];
+                let initialized_data = buffers.pop().map(|mut data| {
+                    // 截取已经写入的数据长度
+                    unsafe {
+                        data.set_len(size);
+                        // 利用 MaybeUninit<u8> 和 u8 布局相同
+                        let ptr = data.as_mut_ptr() as *mut u8;
+                        let len = data.len();
+                        let cap = data.capacity();
+                        let initialized_vec = Vec::from_raw_parts(ptr, len, cap);
+                        std::mem::forget(data);
+                        bytes::Bytes::from(initialized_vec)
+                    }
+                });
+                if let Some(initialized_data) = initialized_data {
+                    if let Err(e) = Self::process_shred(
+                        initialized_data,
+                        &senders,
+                        &processed_fec_sets,
+                        // &received_at_micros,
+                    ) {
+                        error!("Receiver failed to process shred: {}", e);
+                        #[cfg(feature = "metrics")]
+                        if let Some(metrics) = Metrics::try_get() {
+                            metrics
+                                .errors
+                                .with_label_values(&["receiver", "process_shred"])
+                                .inc();
+                        }
                     }
                 }
             }
@@ -245,90 +301,12 @@ impl ShredReceiver {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn receive_loop_recv(
-        socket: Arc<Socket>,
-        senders: Vec<Sender<ShredBytesMeta>>,
-        processed_fec_sets: Arc<ProcessedFecSets>,
-    ) -> Result<()> {
-        #[cfg(feature = "metrics")]
-        let mut last_channel_update = std::time::Instant::now();
-        // Pre-allocate buffer
-        let mut buffer = vec![MaybeUninit::<u8>::uninit(); SHRED_SIZE];
-
-        loop {
-            match socket.recv(&mut buffer) {
-                Ok(size) if size > 0 => {
-                    let received_at_micros = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as u64;
-
-                    // SAFETY: socket.recv() guarantees the first `size` bytes are initialized
-                    let initialized_data =
-                        unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, size) };
-
-                    if let Err(e) = Self::process_shred(
-                        initialized_data,
-                        &senders,
-                        &processed_fec_sets,
-                        &received_at_micros,
-                    ) {
-                        error!("Receiver failed to process shred: {}", e);
-                        #[cfg(feature = "metrics")]
-                        if let Some(metrics) = Metrics::try_get() {
-                            metrics
-                                .errors
-                                .with_label_values(&["receiver", "process_shred"])
-                                .inc();
-                        }
-                    }
-                }
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(e) => {
-                    error!("Socket receive error: {}", e);
-                    #[cfg(feature = "metrics")]
-                    if let Some(metrics) = Metrics::try_get() {
-                        metrics
-                            .errors
-                            .with_label_values(&["receiver", "socket_receive"])
-                            .inc();
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-
-            // Update metrics periodically
-            #[cfg(feature = "metrics")]
-            if last_channel_update.elapsed() > Duration::from_secs(1) {
-                if let Ok((buf_used, buf_size)) = Self::get_socket_buffer_stats(&socket) {
-                    if buf_size > 0 {
-                        let utilization = (buf_used as f64 / buf_size as f64) * 100.0;
-                        if let Some(metrics) = Metrics::try_get() {
-                            metrics
-                                .receiver_socket_buffer_utilization
-                                .with_label_values(&["receiver"])
-                                .set(utilization as i64)
-                        }
-                    }
-                }
-
-                last_channel_update = std::time::Instant::now();
-            }
-        }
-    }
-
     /// Creates ShredBytesMeta and sends through `senders`
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn process_shred(
-        buffer: &[u8],
+        buffer: bytes::Bytes,
         senders: &[Sender<ShredBytesMeta>],
         processed_fec_sets: &ProcessedFecSets,
-        received_at_micros: &u64,
     ) -> Result<()> {
         if buffer.len() < 88 {
             // Minimum shred header size
@@ -343,10 +321,13 @@ impl ShredReceiver {
                 .inc();
         }
 
+        let buffer_slice = buffer.as_ref();
         // Parse shred header
-        let slot = u64::from_le_bytes(buffer[OFFSET_SHRED_SLOT..OFFSET_SHRED_SLOT + 8].try_into()?);
-        let fec_set_index =
-            u32::from_le_bytes(buffer[OFFSET_FEC_SET_INDEX..OFFSET_FEC_SET_INDEX + 4].try_into()?);
+        let slot =
+            u64::from_le_bytes(buffer_slice[OFFSET_SHRED_SLOT..OFFSET_SHRED_SLOT + 8].try_into()?);
+        let fec_set_index = u32::from_le_bytes(
+            buffer_slice[OFFSET_FEC_SET_INDEX..OFFSET_FEC_SET_INDEX + 4].try_into()?,
+        );
 
         let fec_key = (slot, fec_set_index);
         if processed_fec_sets.contains(&fec_key) {
@@ -357,7 +338,7 @@ impl ShredReceiver {
         let worker_id = (fec_set_index as usize) % senders.len();
         let sender = &senders[worker_id];
         let shred_bytes_meta = ShredBytesMeta {
-            shred_bytes: bytes::Bytes::copy_from_slice(buffer),
+            shred_bytes: buffer,
             // received_at_micros: Some(*received_at_micros),
         };
         match sender.try_send(shred_bytes_meta) {
