@@ -9,7 +9,7 @@ use anyhow::Result;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
-use std::{mem, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
@@ -161,8 +161,6 @@ impl SlotAccumulator {
     }
 }
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 pub struct ShredProcessor {
     // fec_load_average: Arc<AtomicUsize>,
     // batch_load_average: Arc<AtomicUsize>,
@@ -265,13 +263,26 @@ impl ShredProcessor {
             .map(|_| tokio::sync::mpsc::channel::<BatchWork>(10000))
             .unzip();
 
+        // Create shared accumulators for dispatch worker and cleanup task
+        let slot_accumulators = Arc::new(tokio::sync::Mutex::new(HashMap::<u64, SlotAccumulator>::with_capacity(100)));
+        let processed_slots = Arc::new(tokio::sync::Mutex::new(HashSet::<u64>::new()));
+
+        // Spawn background cleanup task
+        let _cleanup_handle = {
+            let slot_accumulators_clone = Arc::clone(&slot_accumulators);
+            let processed_slots_clone = Arc::clone(&processed_slots);
+            tokio::spawn(async move {
+                Self::background_cleanup_task(slot_accumulators_clone, processed_slots_clone).await;
+            })
+        };
+
         // Spawn batch dispatch worker
         let dispatch_handle = {
             let senders = batch_senders.clone();
             let proc = Arc::clone(&processor);
 
             tokio::spawn(async move {
-                if let Err(e) = proc.dispatch_worker(completed_fec_receiver, senders).await {
+                if let Err(e) = proc.dispatch_worker(completed_fec_receiver, senders, slot_accumulators, processed_slots).await {
                     error!("Accumulation worker failed: {:?}", e)
                 }
             })
@@ -641,46 +652,48 @@ impl ShredProcessor {
         self: Arc<Self>,
         mut completed_fec_receiver: Receiver<CompletedFecSet>,
         batch_sender: Vec<Sender<BatchWork>>,
+        slot_accumulators: Arc<tokio::sync::Mutex<HashMap<u64, SlotAccumulator>>>,
+        processed_slots: Arc<tokio::sync::Mutex<HashSet<u64>>>,
     ) -> Result<()> {
-        let mut slot_accumulators: HashMap<u64, SlotAccumulator> = HashMap::with_capacity(100);
-        let mut processed_slots = HashSet::new();
         let mut next_worker = 0usize;
-        let mut last_maintenance = Instant::now();
+        let mut last_metrics_update = Instant::now();
 
         loop {
             match completed_fec_receiver.recv().await {
                 Some(completed_fec_set) => {
-                    hotpath::measure_block!("dispatch_worker_loop", {
-                        if let Err(e) = self
-                            .accumulate_completed_fec_set(
-                                completed_fec_set,
-                                &mut slot_accumulators,
-                                &processed_slots,
-                                &batch_sender,
-                                &mut next_worker,
-                            )
-                            .await
+                    // Acquire locks for short duration
+                    let mut accumulators = slot_accumulators.lock().await;
+                    let slots = processed_slots.lock().await;
+
+                    if let Err(e) = self
+                        .accumulate_completed_fec_set(
+                            completed_fec_set,
+                            &mut accumulators,
+                            &slots,
+                            &batch_sender,
+                            &mut next_worker,
+                        )
+                        .await
+                    {
+                        error!("Failed to process completed FEC set: {}", e);
+                    }
+
+                    // Release locks before metrics update
+                    drop(accumulators);
+                    drop(slots);
+
+                    // Update metrics only - cleanup is now background task's responsibility
+                    #[cfg(feature = "metrics")]
+                    if last_metrics_update.elapsed() > Duration::from_secs(1) {
+                        #[cfg(feature = "metrics")]
                         {
-                            error!("Failed to process completed FEC set: {}", e);
-                        }
-
-                        if last_maintenance.elapsed() > Duration::from_secs(1) {
-                            // Clean up
-                            if let Err(e) =
-                                Self::cleanup_memory(&mut slot_accumulators, &mut processed_slots)
-                            {
-                                error!("Could not clean up memory: {:?}", e)
-                            }
-
-                            // Metrics
-                            #[cfg(feature = "metrics")]
-                            if let Err(e) = Self::update_resource_metrics(&mut slot_accumulators) {
+                            let accumulators = slot_accumulators.lock().await;
+                            if let Err(e) = Self::update_resource_metrics(&accumulators) {
                                 error!("Could not update resource metrics: {:?}", e)
                             }
-
-                            last_maintenance = Instant::now();
                         }
-                    });
+                        last_metrics_update = Instant::now();
+                    }
                 }
 
                 None => {
@@ -979,6 +992,7 @@ impl ShredProcessor {
         Ok(entries)
     }
 
+    #[allow(dead_code)]
     fn find_earliest_contributing_shred_timestamp(
         entry_start_pos: usize,
         shred_indices: &[usize],
@@ -1062,7 +1076,75 @@ impl ShredProcessor {
         });
     }
 
+    /// Background task that periodically cleans up expired slot accumulators
+    /// This runs in a separate task to avoid blocking the main processing loop
+    async fn background_cleanup_task(
+        slot_accumulators: Arc<tokio::sync::Mutex<HashMap<u64, SlotAccumulator>>>,
+        processed_slots: Arc<tokio::sync::Mutex<HashSet<u64>>>,
+    ) {
+        info!("Background cleanup task started");
+        let cleanup_interval = Duration::from_secs(5); // More frequent but incremental cleanup
+        let mut interval = tokio::time::interval(cleanup_interval);
+
+        loop {
+            interval.tick().await;
+
+            tokio::task::yield_now().await; // Yield to allow other tasks to run
+
+            let now = Instant::now();
+
+            // Acquire locks and perform incremental cleanup
+            {
+                let mut acc = slot_accumulators.lock().await;
+                let mut sl = processed_slots.lock().await;
+
+                // Incremental cleanup: remove up to 10 slots at a time
+                let slots_to_remove: Vec<u64> = acc
+                    .iter()
+                    .filter(|(_, accumulator)| now.duration_since(accumulator.created_at) > MAX_AGE)
+                    .map(|(slot, _)| *slot)
+                    .take(10)
+                    .collect();
+
+                let cleaned_count = slots_to_remove.len();
+
+                // Remove slots
+                for slot in &slots_to_remove {
+                    acc.remove(slot);
+                    sl.remove(slot);
+                }
+
+                if cleaned_count > 0 {
+                    info!(
+                        "Background cleanup: removed {} expired slots ({} remaining)",
+                        cleaned_count,
+                        acc.len()
+                    );
+                }
+
+                #[cfg(feature = "metrics")]
+                {
+                    if let Some(metrics) = Metrics::try_get() {
+                        metrics
+                            .slot_accumulators_count
+                            .with_label_values(&["cleanup"])
+                            .set(acc.len() as i64);
+                        metrics
+                            .processed_slots_count
+                            .with_label_values(&["cleanup"])
+                            .set(sl.len() as i64);
+                    }
+                }
+            }
+        }
+    }
+
+
+    /// Cleanup expired slot accumulators from memory.
+    /// Note: This function is now deprecated in favor of background_cleanup_task,
+    /// which runs in a separate task to avoid blocking the main processing loop.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[allow(dead_code)]
     pub fn cleanup_memory(
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &mut HashSet<u64>,
