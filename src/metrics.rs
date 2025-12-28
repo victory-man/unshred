@@ -21,9 +21,6 @@ pub struct Metrics {
 
     pub active_slots: IntGaugeVec,
 
-    pub slot_accumulators_count: IntGaugeVec,
-    pub processed_slots_count: IntGaugeVec,
-
     pub errors: IntCounterVec,
 }
 
@@ -84,20 +81,6 @@ impl Metrics {
             active_slots: register_int_gauge_vec_with_registry!(
                 "active_slots",
                 "Number of active slots being processed",
-                &["component"],
-                registry.clone()
-            )?,
-
-            slot_accumulators_count: register_int_gauge_vec_with_registry!(
-                "slot_accumulators_count",
-                "Number of slot accumulators in memory",
-                &["component"],
-                registry.clone()
-            )?,
-
-            processed_slots_count: register_int_gauge_vec_with_registry!(
-                "processed_slots_count",
-                "Number of processed slots in memory",
                 &["component"],
                 registry.clone()
             )?,
