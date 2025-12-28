@@ -142,7 +142,7 @@ impl ShredReceiver {
         Ok(())
     }
 
-    // #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     fn receive_loop_mmsg(
         buffer_allocator: Arc<BufferAllocator>,
         socket: Arc<Socket>,
