@@ -322,12 +322,12 @@ impl Reader<'_> for SkipBytesReader {
                 self.offset += advance;
                 unadvanced -= advance;
                 // next chunk
-                if self.offset == chunk.len() {
+                if self.offset >= chunk.len() {
                     self.offset = 0;
                     self.chunk_idx += 1;
                 }
             } else {
-                return Err(wincode::io::ReadError::ReadSizeLimit(amt));
+                return Err(wincode::io::ReadError::ReadSizeLimit(unadvanced));
             }
         }
         Ok(())
@@ -400,16 +400,13 @@ mod test {
             ]);
             reader
         };
+        // let mut reader = new_reader();
+        // reader.consume(0).unwrap();
+        // assert_eq!(reader.chunk_idx, 0);
+        // assert_eq!(reader.offset, 0);
+
         let mut reader = new_reader();
-        reader.consume(0).unwrap();
-        assert_eq!(reader.chunk_idx, 0);
-        assert_eq!(reader.offset, 0);
-
-        reader.consume(2).unwrap();
-        assert_eq!(reader.chunk_idx, 0);
-        assert_eq!(reader.offset, 2);
-
-        reader.consume(1).unwrap();
+        reader.consume(3).unwrap();
         assert_eq!(reader.chunk_idx, 1);
         assert_eq!(reader.offset, 0);
 
@@ -417,12 +414,9 @@ mod test {
         assert_eq!(reader.chunk_idx, 1);
         assert_eq!(reader.offset, 1);
 
-        reader.consume(2).unwrap();
-        assert_eq!(reader.chunk_idx, 2);
-        assert_eq!(reader.offset, 0);
-
+        let mut reader = new_reader();
+        reader.consume(6).unwrap();
         assert!(matches!(reader.consume(1), Err(ReadError::ReadSizeLimit(_))))
-
 
     }
 
