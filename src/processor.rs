@@ -599,6 +599,7 @@ impl ShredProcessor {
         Ok(())
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn can_reconstruct_fec_set(acc: &FecSetAccumulator) -> ReconstructionStatus {
         let data_count = acc.data_shreds.len();
         let code_count = acc.code_shreds.len();
@@ -624,6 +625,7 @@ impl ShredProcessor {
         }
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn recover_fec(
         acc: &mut FecSetAccumulator,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
