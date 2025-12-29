@@ -17,7 +17,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
-use std::io::Read;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
@@ -1000,7 +999,6 @@ impl ShredProcessor {
                 // } else {
                 //     return Err(anyhow::anyhow!("Missing data in shred"));
                 // }
-
                 if payload.bytes.len() >= (DATA_OFFSET_PAYLOAD + data_size) {
                     result.combined_data = payload
                         .bytes
@@ -1019,7 +1017,7 @@ impl ShredProcessor {
     fn parse_entries_from_batch_data(
         combined_data_meta: CombinedDataMeta,
     ) -> Result<Vec<EntryMeta>> {
-        let combined_data = combined_data_meta.combined_data.as_ref();
+        let combined_data = combined_data_meta.combined_data;
         if combined_data.len() <= 8 {
             return Ok(Vec::new());
         }
@@ -1027,7 +1025,7 @@ impl ShredProcessor {
         // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
         let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        let mut cursor = wincode::io::Cursor::new(combined_data);
+        let mut cursor = wincode::io::Cursor::new(&combined_data);
         cursor.set_position(8);
 
         let mut entries = Vec::with_capacity(entry_count as usize);
