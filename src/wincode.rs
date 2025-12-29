@@ -306,7 +306,7 @@ impl Reader<'_> for SkipBytesReader {
     }
 
     unsafe fn consume_unchecked(&mut self, amt: usize) {
-        let _ = self.consume(amt);
+        self.consume(amt).unwrap()
     }
 
     fn consume(&mut self, amt: usize) -> wincode::io::ReadResult<()> {
@@ -322,10 +322,9 @@ impl Reader<'_> for SkipBytesReader {
                 self.offset += advance;
                 unadvanced -= advance;
                 // next chunk
-                if self.offset == chunk.len() {
+                if self.offset >= chunk.len() {
                     self.offset = 0;
                     self.chunk_idx += 1;
-                    iter = self.chunks.iter().skip(self.chunk_idx);
                 }
             } else {
                 return Err(wincode::io::ReadError::ReadSizeLimit(unadvanced));
