@@ -34,5 +34,6 @@ tracing = "0.1.41"
 wincode = { version = "0.2.5", features = ["solana-short-vec", "derive"] }
 hotpath = { version = "0.2.5"}
 crossbeam = "0.8.4"
+arrayref = "0.3.9"
 #moka = { version = "0.12.12", features = ["sync"] }
 #opool = "0.2.0"
