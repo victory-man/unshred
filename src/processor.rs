@@ -10,7 +10,6 @@ use crossbeam::queue::SegQueue;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
-use std::ops::Deref;
 use std::{mem, sync::Arc, time::Duration};
 use std::{
     sync::Mutex,
@@ -133,8 +132,7 @@ pub struct BatchWork {
 struct CombinedDataMeta {
     // combined_data_shred_indices: Vec<usize>,
     // combined_data_shred_received_at_micros: Vec<Option<u64>>,
-    // combined_data: Vec<u8>,
-    combined_data: Bytes,
+    combined_data: Vec<u8>,
 }
 
 impl CombinedDataMeta {
@@ -142,7 +140,7 @@ impl CombinedDataMeta {
         Self {
             // combined_data_shred_indices: Vec::with_capacity(shred_count),
             // combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
-            combined_data: Bytes::new(),
+            combined_data: Vec::with_capacity(estimated_data_size),
         }
     }
 }
@@ -176,7 +174,6 @@ impl SlotAccumulator {
     }
 }
 
-use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ShredProcessor {
@@ -992,17 +989,10 @@ impl ShredProcessor {
                 let total_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]) as usize;
                 let data_size = total_size.saturating_sub(DATA_OFFSET_PAYLOAD);
 
-                // if let Some(data) =
-                //     payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
-                // {
-                //     result.combined_data.extend_from_slice(data);
-                // } else {
-                //     return Err(anyhow::anyhow!("Missing data in shred"));
-                // }
-                if payload.bytes.len() >= (DATA_OFFSET_PAYLOAD + data_size) {
-                    result.combined_data = payload
-                        .bytes
-                        .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size);
+                if let Some(data) =
+                    payload.get(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
+                {
+                    result.combined_data.extend_from_slice(data);
                 } else {
                     return Err(anyhow::anyhow!("Missing data in shred"));
                 }
