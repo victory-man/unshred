@@ -10,7 +10,6 @@ use crossbeam::queue::SegQueue;
 use dashmap::DashSet;
 use solana_entry::entry::Entry;
 use solana_ledger::shred::{ReedSolomonCache, Shred, ShredType};
-use std::io::Read;
 use std::ops::Deref;
 use std::{mem, sync::Arc, time::Duration};
 use std::{
@@ -18,6 +17,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
     u64,
 };
+use std::io::Read;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
@@ -177,7 +177,6 @@ impl SlotAccumulator {
     }
 }
 
-use arrayref::array_ref;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1027,7 +1026,7 @@ impl ShredProcessor {
         // let shred_indices = &combined_data_meta.combined_data_shred_indices;
         // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
-        let entry_count = u64::from_le_bytes(*array_ref![combined_data, 0, 8]);
+        let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
         let mut cursor = wincode::io::Cursor::new(combined_data);
         cursor.set_position(8);
 
