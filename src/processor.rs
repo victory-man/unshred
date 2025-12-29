@@ -3,7 +3,7 @@ use crate::metrics::Metrics;
 use crate::{types::ShredBytesMeta, TransactionEvent, TransactionHandler, UnshredConfig};
 
 use crate::types::ProcessedFecSets;
-use crate::wincode::{EntryProxy, SkipBytesReader};
+use crate::wincode::EntryProxy;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use anyhow::Result;
 use crossbeam::queue::SegQueue;
@@ -135,7 +135,7 @@ struct CombinedDataMeta {
     // combined_data_shred_indices: Vec<usize>,
     // combined_data_shred_received_at_micros: Vec<Option<u64>>,
     // combined_data: Vec<u8>,
-    combined_data: Vec<Bytes>,
+    combined_data: Bytes,
 }
 
 impl CombinedDataMeta {
@@ -143,7 +143,7 @@ impl CombinedDataMeta {
         Self {
             // combined_data_shred_indices: Vec::with_capacity(shred_count),
             // combined_data_shred_received_at_micros: Vec::with_capacity(shred_count),
-            combined_data: Vec::with_capacity(shred_count),
+            combined_data: Bytes::new(),
         }
     }
 }
@@ -180,7 +180,6 @@ impl SlotAccumulator {
 use arrayref::array_ref;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use wincode::io::Reader;
 
 pub struct ShredProcessor {
     // fec_load_average: Arc<AtomicUsize>,
@@ -1004,11 +1003,9 @@ impl ShredProcessor {
                 // }
 
                 if payload.bytes.len() >= (DATA_OFFSET_PAYLOAD + data_size) {
-                    result.combined_data.push(
-                        payload
-                            .bytes
-                            .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size)
-                    );
+                    result.combined_data = payload
+                        .bytes
+                        .slice(DATA_OFFSET_PAYLOAD..DATA_OFFSET_PAYLOAD + data_size);
                 } else {
                     return Err(anyhow::anyhow!("Missing data in shred"));
                 }
@@ -1023,16 +1020,16 @@ impl ShredProcessor {
     fn parse_entries_from_batch_data(
         combined_data_meta: CombinedDataMeta,
     ) -> Result<Vec<EntryMeta>> {
-        // let mut combined_data = Vec::with_capacity(1024);
-        // combined_data.extend_from_slice(combined_data_meta.combined_data.as_ref());
-        let mut cursor = SkipBytesReader::new(combined_data_meta.combined_data);
-        if cursor.total_bytes() <= 8 {
+        let mut combined_data = Vec::with_capacity(1024);
+        combined_data.extend_from_slice(combined_data_meta.combined_data.as_ref());
+        if combined_data.len() <= 8 {
             return Ok(Vec::new());
-        };
-        let entry_count = u64::from_le_bytes(*cursor.fill_array::<8>()?);
+        }
         // let shred_indices = &combined_data_meta.combined_data_shred_indices;
         // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
+        let entry_count = u64::from_le_bytes(*array_ref![combined_data, 0, 8]);
+        let mut cursor = wincode::io::Cursor::new(combined_data);
         cursor.set_position(8);
 
         let mut entries = Vec::with_capacity(entry_count as usize);
