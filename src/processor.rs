@@ -439,7 +439,11 @@ impl ShredProcessor {
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(30) {
-                Self::cleanup_fec_sets(&mut fec_set_accumulators, &processed_fec_sets, &fec_cleanup_queue);
+                Self::cleanup_fec_sets(
+                    &mut fec_set_accumulators,
+                    &processed_fec_sets,
+                    &fec_cleanup_queue,
+                );
                 last_cleanup = Instant::now();
             }
         }
@@ -646,7 +650,10 @@ impl ShredProcessor {
             shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
         }
 
-        match solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache) {
+        let recovered_shreds = hotpath::measure_block!("solana_ledger::shred::recover", {
+            solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache)
+        });
+        match recovered_shreds {
             Ok(recovered_shreds) => {
                 for result in recovered_shreds {
                     match result {
