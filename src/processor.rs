@@ -1020,7 +1020,8 @@ impl ShredProcessor {
     fn parse_entries_from_batch_data(
         combined_data_meta: CombinedDataMeta,
     ) -> Result<Vec<EntryMeta>> {
-        let combined_data = combined_data_meta.combined_data.as_ref();
+        let mut combined_data = Vec::with_capacity(1024);
+        combined_data.extend_from_slice(combined_data_meta.combined_data.as_ref());
         if combined_data.len() <= 8 {
             return Ok(Vec::new());
         }
