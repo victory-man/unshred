@@ -87,15 +87,15 @@ impl XdpReader {
                             debug!("upd pkg {}bytes", data.len());
                         }
 
-                        let initialized_data = data.as_slice();
-                        if let Err(e) = ShredReceiver::process_shred(
-                            initialized_data,
-                            &senders,
-                            &processed_fec_sets,
-                            // &received_at_micros,
-                        ) {
-                            error!("Receiver failed to process shred: {}", e);
-                        }
+                        // let initialized_data = data.as_slice();
+                        // if let Err(e) = ShredReceiver::process_shred(
+                        //     initialized_data,
+                        //     &senders,
+                        //     &processed_fec_sets,
+                        //     // &received_at_micros,
+                        // ) {
+                        //     error!("Receiver failed to process shred: {}", e);
+                        // }
                     }
                     guard.clear_ready();
                 }
