@@ -42,7 +42,7 @@ impl XdpReader {
     pub fn new(iface: &str, bind_addr: SocketAddr) -> anyhow::Result<Self> {
         Ok(Self {
             iface: iface.to_string(),
-            port,
+            port: bind_addr.port(),
         })
     }
 
