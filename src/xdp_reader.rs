@@ -77,7 +77,7 @@ impl XdpReader {
         let mut turbine_port_map =
             aya::maps::PerCpuHashMap::<_, _, u8>::try_from(bpf.map_mut("TURBINE_PORTS").unwrap())?;
         turbine_port_map.insert(port, PerCpuValues::try_from(vec![0; nr_cpus])?, 0)?;
-        println!("started watching turbine on {port}");
+        info!("started watching turbine on {} {}", port, iface);
         let turbine_packets = RingBuf::try_from(bpf.take_map("PACKET_BUF").unwrap())?;
         let mut reader = AsyncFd::new(turbine_packets)?;
         loop {
@@ -90,6 +90,15 @@ impl XdpReader {
                         let (data, is_egress) = unsafe { core::ptr::read(ptr) };
                         if log_enabled!(Level::Debug) {
                             debug!("收到udp包,长度: {}", data.len());
+                        }
+                        let initialized_data = data.as_slice();
+                        if let Err(e) = ShredReceiver::process_shred(
+                            initialized_data,
+                            &senders,
+                            &processed_fec_sets,
+                            // &received_at_micros,
+                        ) {
+                            error!("Receiver failed to process shred: {}", e);
                         }
                     }
                     guard.clear_ready();
