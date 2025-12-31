@@ -50,7 +50,7 @@ impl XdpReader {
         self,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
-    ) -> anyhow::Result<Vec<JoinHandle<()>>> {
+    ) -> anyhow::Result<Vec<JoinHandle<anyhow::Result<()>>>> {
         let handle =
             tokio::spawn(
                 async move { Self::receive_loop(self, senders, processed_fec_sets).await },

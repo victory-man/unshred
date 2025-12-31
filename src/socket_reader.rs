@@ -62,7 +62,7 @@ impl SocketReader {
         self,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
-    ) -> anyhow::Result<Vec<JoinHandle<()>>> {
+    ) -> anyhow::Result<Vec<JoinHandle<anyhow::Result<()>>>> {
         // Spawn receiver threads
         let num_receivers = 1;
         info!("Starting {} network receiver workers", num_receivers);
@@ -77,6 +77,7 @@ impl SocketReader {
                 if let Err(e) = Self::receive_loop(socket, senders, processed_fec_sets) {
                     error!("Reciever {} failed: {}", i, e);
                 }
+                Ok(())
             });
             handles.push(handle);
         }

@@ -42,7 +42,7 @@ impl ShredReceiver {
             UdpReader::Xdp(xdp) => xdp.run(senders, processed_fec_sets)?,
         };
         for handle in handles {
-            handle.await?;
+            handle.await??;
         }
         Ok(())
     }
