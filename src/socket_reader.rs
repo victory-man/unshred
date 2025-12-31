@@ -109,7 +109,7 @@ impl SocketReader {
         let mut last_channel_update = std::time::Instant::now();
 
         // 预分配多个缓冲区用于 recvmmsg
-        let mut buffers: Vec<Vec<MaybeUninit<u8>>> = (0..crate::receiver::RECV_MMSG_MESSAGES)
+        let mut buffers: Vec<Vec<MaybeUninit<u8>>> = (0..RECV_MMSG_MESSAGES)
             .map(|_| vec![MaybeUninit::<u8>::uninit(); SHRED_SIZE])
             .collect();
 
@@ -121,7 +121,7 @@ impl SocketReader {
             })
             .collect();
 
-        let mut msghdrs: Vec<libc::msghdr> = (0..crate::receiver::RECV_MMSG_MESSAGES)
+        let mut msghdrs: Vec<libc::msghdr> = (0..RECV_MMSG_MESSAGES)
             .map(|_| unsafe { mem::zeroed() })
             .collect();
 
