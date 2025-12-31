@@ -1,40 +1,41 @@
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use crate::receiver::ShredReceiver;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use crate::types::{ProcessedFecSets, ShredBytesMeta};
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use arrayvec::ArrayVec;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use aya::maps::{MapData, PerCpuValues, RingBuf};
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use aya::programs::{Xdp, XdpFlags};
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use aya::util::nr_cpus;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use aya::{include_bytes_aligned, Ebpf};
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use std::net::SocketAddr;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use tokio::io::unix::AsyncFd;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use tokio::sync::mpsc::Sender;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use tokio::task::JoinHandle;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use tracing::{error, info};
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 use tracing::debug;
+use tracing::log::{log_enabled, Level};
 
 const PACKET_DATA_SIZE: usize = 1232;
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 pub struct XdpReader {
     reader: AsyncFd<RingBuf<MapData>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
 impl XdpReader {
     pub fn new(iface: &str, bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
@@ -50,6 +51,7 @@ impl XdpReader {
         let port = bind_addr.port();
         turbine_port_map.insert(port, PerCpuValues::try_from(vec![0; nr_cpus])?, 0)?;
         info!("Started watching turbine on {}", port);
+        info!("XDP绑定: interface={}, port={}", iface, port);
         let turbine_packets = RingBuf::try_from(bpf.take_map("PACKET_BUF").unwrap())?;
         let reader = AsyncFd::new(turbine_packets)?;
         Ok(Self { reader })
@@ -81,7 +83,9 @@ impl XdpReader {
                         let (data, is_egress) = unsafe { core::ptr::read(ptr) };
 
                         // println!("{}{}","收到udp包,长度: ",data.len());
-                        debug!("upd pkg {}bytes", data.len());
+                        if log_enabled!(Level::Debug) {
+                            debug!("upd pkg {}bytes", data.len());
+                        }
 
                         let initialized_data = data.as_slice();
                         if let Err(e) = ShredReceiver::process_shred(
