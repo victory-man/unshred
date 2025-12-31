@@ -37,5 +37,5 @@ hotpath = { version = "0.2.5"}
 crossbeam = "0.8.4"
 arrayvec = "0.7.6"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+#[target.'cfg(target_os = "linux")'.dependencies]
 aya = { git = "https://github.com/aya-rs/aya.git" }
