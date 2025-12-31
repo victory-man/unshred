@@ -1,41 +1,41 @@
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use crate::receiver::ShredReceiver;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use crate::types::{ProcessedFecSets, ShredBytesMeta};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use arrayvec::ArrayVec;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use aya::maps::{MapData, PerCpuValues, RingBuf};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use aya::programs::{Xdp, XdpFlags};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use aya::util::nr_cpus;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use aya::{include_bytes_aligned, Ebpf};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use tokio::io::unix::AsyncFd;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use tokio::sync::mpsc::Sender;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use tracing::{error, info};
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 use tracing::debug;
 use tracing::log::{log_enabled, Level};
 
 const PACKET_DATA_SIZE: usize = 1232;
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 pub struct XdpReader {
     reader: AsyncFd<RingBuf<MapData>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
 impl XdpReader {
     pub fn new(iface: &str, bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
