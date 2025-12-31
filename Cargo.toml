@@ -7,7 +7,7 @@ edition = "2021"
 [features]
 default = []
 metrics = ["prometheus"]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath = ["hotpath/hotpath"]
 hotpath-alloc-bytes-total = ["hotpath/hotpath-alloc-bytes-total"]
 hotpath-alloc-bytes-max = ["hotpath/hotpath-alloc-bytes-max"]
 hotpath-alloc-count-total = ["hotpath/hotpath-alloc-count-total"]
@@ -34,6 +34,6 @@ tracing = "0.1.41"
 wincode = { version = "0.2.5", features = ["solana-short-vec", "derive"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-queue"] }
 log = "0.4.28"
-hotpath = { version = "0.2.5", optional = true }
+hotpath = { version = "0.2.5"}
 #moka = { version = "0.12.12", features = ["sync"] }
 #opool = "0.2.0"
