@@ -23,38 +23,27 @@ use tokio::sync::mpsc::Sender;
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 #[cfg(target_os = "linux")]
-use tracing::{error, info};
-#[cfg(target_os = "linux")]
 use tracing::debug;
+#[cfg(target_os = "linux")]
 use tracing::log::{log_enabled, Level};
+#[cfg(target_os = "linux")]
+use tracing::{error, info};
 
 const PACKET_DATA_SIZE: usize = 1232;
 
 #[cfg(target_os = "linux")]
 pub struct XdpReader {
-    reader: AsyncFd<RingBuf<MapData>>,
+    iface: String,
+    port: u16,
 }
 
 #[cfg(target_os = "linux")]
 impl XdpReader {
     pub fn new(iface: &str, bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
-        let program: &mut Xdp = bpf
-            .program_mut("xdp_turbine_probe")
-            .ok_or_else(|| anyhow::anyhow!("program not found"))?
-            .try_into()?;
-        program.load()?;
-        program.attach(iface, XdpFlags::default())?;
-        let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
-        let mut turbine_port_map =
-            aya::maps::PerCpuHashMap::<_, _, u8>::try_from(bpf.map_mut("TURBINE_PORTS").unwrap())?;
-        let port = bind_addr.port();
-        turbine_port_map.insert(port, PerCpuValues::try_from(vec![0; nr_cpus])?, 0)?;
-        info!("Started watching turbine on {}", port);
-        info!("XDP绑定: interface={}, port={}", iface, port);
-        let turbine_packets = RingBuf::try_from(bpf.take_map("PACKET_BUF").unwrap())?;
-        let reader = AsyncFd::new(turbine_packets)?;
-        Ok(Self { reader })
+        Ok(Self {
+            iface: iface.to_string(),
+            port,
+        })
     }
 
     pub fn run(
@@ -62,17 +51,35 @@ impl XdpReader {
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
     ) -> anyhow::Result<Vec<JoinHandle<()>>> {
-        let handle = tokio::spawn(async move {
-            Self::receive_loop(self.reader, senders, processed_fec_sets).await
-        });
+        let handle =
+            tokio::spawn(
+                async move { Self::receive_loop(self, senders, processed_fec_sets).await },
+            );
         Ok(vec![handle])
     }
 
     async fn receive_loop(
-        mut reader: AsyncFd<RingBuf<MapData>>,
+        reader: XdpReader,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
     ) {
+        let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
+        let iface = reader.iface.as_str();
+        let port: u16 = reader.port;
+
+        let program: &mut Xdp = bpf
+            .program_mut("xdp_turbine_probe")
+            .ok_or_else(|| anyhow::anyhow!("program not found"))?
+            .try_into()?;
+        program.load()?;
+        program.attach(&iface, XdpFlags::default())?;
+        let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
+        let mut turbine_port_map =
+            aya::maps::PerCpuHashMap::<_, _, u8>::try_from(bpf.map_mut("TURBINE_PORTS").unwrap())?;
+        turbine_port_map.insert(port, PerCpuValues::try_from(vec![0; nr_cpus])?, 0)?;
+        println!("started watching turbine on {port}");
+        let turbine_packets = RingBuf::try_from(bpf.take_map("PACKET_BUF").unwrap())?;
+        let mut reader = AsyncFd::new(turbine_packets)?;
         loop {
             tokio::select! {
                 mut guard = reader.readable_mut() => {
@@ -81,26 +88,13 @@ impl XdpReader {
                     while let Some(read) = rb.next() {
                         let ptr = read.as_ptr() as *const (ArrayVec<u8, PACKET_DATA_SIZE>, bool);
                         let (data, is_egress) = unsafe { core::ptr::read(ptr) };
-
-                        // println!("{}{}","收到udp包,长度: ",data.len());
                         if log_enabled!(Level::Debug) {
-                            debug!("upd pkg {}bytes", data.len());
+                            debug!("收到udp包,长度: {}", data.len());
                         }
-
-                        // let initialized_data = data.as_slice();
-                        // if let Err(e) = ShredReceiver::process_shred(
-                        //     initialized_data,
-                        //     &senders,
-                        //     &processed_fec_sets,
-                        //     // &received_at_micros,
-                        // ) {
-                        //     error!("Receiver failed to process shred: {}", e);
-                        // }
                     }
                     guard.clear_ready();
                 }
             }
         }
-        info!("结束xdp读取循环")
     }
 }
