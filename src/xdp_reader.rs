@@ -35,7 +35,7 @@ pub struct XdpReader {
 #[cfg(target_os = "linux")]
 impl XdpReader {
     pub fn new(iface: &str, bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let mut bpf = Ebpf::load(include_bytes_aligned!("turbine-ebpf-spy"))?;
+        let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
         let program: &mut Xdp = bpf
             .program_mut("xdp_turbine_probe")
             .ok_or_else(|| anyhow::anyhow!("program not found"))?
