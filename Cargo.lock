@@ -575,6 +575,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "aya"
+version = "0.13.2"
+source = "git+https://github.com/aya-rs/aya.git#3b28447573eca75420a3cfc9198735f5876e37da"
+dependencies = [
+ "assert_matches",
+ "aya-obj",
+ "bitflags 2.10.0",
+ "bytes",
+ "hashbrown 0.16.0",
+ "libc",
+ "log",
+ "object",
+ "once_cell",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "aya-obj"
+version = "0.2.2"
+source = "git+https://github.com/aya-rs/aya.git#3b28447573eca75420a3cfc9198735f5876e37da"
+dependencies = [
+ "bytes",
+ "hashbrown 0.16.0",
+ "log",
+ "object",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "backoff"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1718,6 +1747,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2023,7 +2058,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -2031,6 +2066,10 @@ name = "hashbrown"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
+dependencies = [
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hdrhistogram"
@@ -3215,6 +3254,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.108",
+]
+
+[[package]]
+name = "object"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8b28f24bd43920cd8e0bc4f9c6553e8b93221c512cb9a1014987fc89d36f830"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.16.0",
+ "indexmap 2.12.0",
+ "memchr",
 ]
 
 [[package]]
@@ -8115,6 +8166,8 @@ version = "0.1.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
+ "arrayvec",
+ "aya",
  "bytes",
  "crossbeam",
  "dashmap 6.1.0",

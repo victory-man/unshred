@@ -174,6 +174,10 @@ impl SlotAccumulator {
     }
 }
 
+use crate::receiver::UdpReader;
+use crate::socket_reader::SocketReader;
+#[cfg(target_os = "linux")]
+use crate::xdp_reader::XdpReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ShredProcessor {
@@ -277,7 +281,24 @@ impl ShredProcessor {
 
         // Spawn network receiver
         let bind_addr: std::net::SocketAddr = config.bind_address.parse()?;
-        let receiver = crate::receiver::ShredReceiver::new(bind_addr)?;
+
+        #[cfg(all(feature = "xdp", target_os = "linux"))]
+        let receiver = {
+            let iface = config
+                .xdp_interface
+                .as_ref()
+                .map(|x| x.as_str())
+                .unwrap_or("bond0");
+            let reader = UdpReader::Xdp(XdpReader::new(iface, bind_addr)?);
+            crate::receiver::ShredReceiver::new(reader)?
+        };
+
+        #[cfg(not(all(feature = "xdp", target_os = "linux")))]
+        let receiver = {
+            let reader = UdpReader::Socket(SocketReader::new(bind_addr)?);
+            crate::receiver::ShredReceiver::new(reader)?
+        };
+
         let receiver_handle =
             tokio::spawn(receiver.run(shred_senders, Arc::clone(&processed_fec_sets)));
 

@@ -6,6 +6,8 @@ mod types;
 #[cfg(feature = "metrics")]
 mod metrics;
 mod wincode;
+mod xdp_reader;
+mod socket_reader;
 
 pub use config::UnshredConfig;
 #[cfg(feature = "metrics")]

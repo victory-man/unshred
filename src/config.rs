@@ -5,6 +5,7 @@ pub struct UnshredConfig {
     pub bind_address: String,
     pub num_fec_workers: Option<u8>,
     pub num_batch_workers: Option<u8>,
+    pub xdp_interface: Option<String>,
 }
 
 impl Default for UnshredConfig {
@@ -13,6 +14,7 @@ impl Default for UnshredConfig {
             bind_address: "0.0.0.0:8001".to_string(),
             num_fec_workers: None,
             num_batch_workers: None,
+            xdp_interface: Some("bond0".into()),
         }
     }
 }
