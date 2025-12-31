@@ -12,6 +12,9 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 const RECV_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64MB
+// recvmsg 相关配置
+#[cfg(target_os = "linux")]
+const RECV_MMSG_MESSAGES: usize = 256; // 一次接收的消息数量
 
 pub struct SocketReader {
     pub socket: Arc<Socket>,
@@ -135,6 +138,7 @@ impl SocketReader {
             })
             .collect();
 
+        use std::os::unix::io::AsRawFd;
         loop {
             hotpath::measure_block!("receive_mmsg_loop", {
                 // 调用 recvmmsg

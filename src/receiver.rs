@@ -15,10 +15,6 @@ const RECV_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64MB
 const OFFSET_SHRED_SLOT: usize = 65;
 const OFFSET_FEC_SET_INDEX: usize = 79;
 
-// recvmsg 相关配置
-#[cfg(target_os = "linux")]
-const RECV_MMSG_MESSAGES: usize = 256; // 一次接收的消息数量
-
 pub enum UdpReader {
     Socket(SocketReader),
 
