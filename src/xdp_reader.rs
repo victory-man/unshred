@@ -97,5 +97,6 @@ impl XdpReader {
                 }
             }
         }
+        info!("结束xdp读取循环")
     }
 }
