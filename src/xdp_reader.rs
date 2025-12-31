@@ -77,7 +77,7 @@ impl XdpReader {
         let mut turbine_port_map =
             aya::maps::PerCpuHashMap::<_, _, u8>::try_from(bpf.map_mut("TURBINE_PORTS").unwrap())?;
         turbine_port_map.insert(port, PerCpuValues::try_from(vec![0; nr_cpus])?, 0)?;
-        info!("started watching turbine on {} {}", port, iface);
+        info!("started watching turbine on {} at {}", port, iface);
         let turbine_packets = RingBuf::try_from(bpf.take_map("PACKET_BUF").unwrap())?;
         let mut reader = AsyncFd::new(turbine_packets)?;
         loop {
