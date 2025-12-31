@@ -24,6 +24,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 #[cfg(target_os = "linux")]
 use tracing::{error, info};
+#[cfg(target_os = "linux")]
+use tracing::debug;
 
 const PACKET_DATA_SIZE: usize = 1232;
 
@@ -70,36 +72,30 @@ impl XdpReader {
         processed_fec_sets: Arc<ProcessedFecSets>,
     ) {
         loop {
-            let mut guard = reader.readable_mut().await;
-            let guard = match guard.as_mut() {
-                Ok(x) => x,
-                Err(err) => {
-                    error!("Error reading from xdp: {}", err);
-                    continue;
-                }
-            };
-            let ring_buf = guard.get_inner_mut();
-            // let received_at_micros = SystemTime::now()
-            //     .duration_since(UNIX_EPOCH)
-            //     .unwrap()
-            //     .as_micros() as u64;
-            while let Some(read) = ring_buf.next() {
-                let ptr = read.as_ptr() as *const (ArrayVec<u8, PACKET_DATA_SIZE>, bool);
-                let (data, _) = unsafe { core::ptr::read(ptr) };
-                // println!("{}{}","收到udp包,长度: ",data.len());
-                // callback(data.as_slice());
+            tokio::select! {
+                mut guard = reader.readable_mut() => {
+                    let guard = guard.as_mut().unwrap();
+                    let rb = guard.get_inner_mut();
+                    while let Some(read) = rb.next() {
+                        let ptr = read.as_ptr() as *const (ArrayVec<u8, PACKET_DATA_SIZE>, bool);
+                        let (data, is_egress) = unsafe { core::ptr::read(ptr) };
 
-                let initialized_data = data.as_slice();
-                if let Err(e) = ShredReceiver::process_shred(
-                    initialized_data,
-                    &senders,
-                    &processed_fec_sets,
-                    // &received_at_micros,
-                ) {
-                    error!("Receiver failed to process shred: {}", e);
+                        // println!("{}{}","收到udp包,长度: ",data.len());
+                        debug!("upd pkg {}bytes", data.len());
+
+                        let initialized_data = data.as_slice();
+                        if let Err(e) = ShredReceiver::process_shred(
+                            initialized_data,
+                            &senders,
+                            &processed_fec_sets,
+                            // &received_at_micros,
+                        ) {
+                            error!("Receiver failed to process shred: {}", e);
+                        }
+                    }
+                    guard.clear_ready();
                 }
             }
-            guard.clear_ready();
         }
     }
 }
