@@ -290,12 +290,14 @@ impl ShredProcessor {
                 .map(|x| x.as_str())
                 .unwrap_or("bond0");
             let reader = UdpReader::Xdp(XdpReader::new(iface, bind_addr)?);
+            info!("使用XDP接收数据");
             crate::receiver::ShredReceiver::new(reader)?
         };
 
         #[cfg(not(all(feature = "xdp", target_os = "linux")))]
         let receiver = {
             let reader = UdpReader::Socket(SocketReader::new(bind_addr)?);
+            info!("使用Socket接收数据");
             crate::receiver::ShredReceiver::new(reader)?
         };
 
