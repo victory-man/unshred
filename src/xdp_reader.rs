@@ -62,7 +62,7 @@ impl XdpReader {
         reader: XdpReader,
         senders: Vec<Sender<ShredBytesMeta>>,
         processed_fec_sets: Arc<ProcessedFecSets>,
-    ) {
+    ) -> anyhow::Result<()> {
         let mut bpf = Ebpf::load(include_bytes_aligned!("../turbine-ebpf-spy"))?;
         let iface = reader.iface.as_str();
         let port: u16 = reader.port;
@@ -96,5 +96,6 @@ impl XdpReader {
                 }
             }
         }
+        Ok(())
     }
 }
