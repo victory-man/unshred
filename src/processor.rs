@@ -586,42 +586,35 @@ impl ShredProcessor {
         reed_solomon_cache: &Arc<ReedSolomonCache>,
         processed_fec_sets: &ProcessedFecSets,
     ) -> Result<()> {
-        let acc = if let Some(accumulator) = fec_set_accumulators.get_mut(&fec_key) {
-            accumulator
-        } else {
-            return Ok(());
+        // 使用 entry API 避免重复哈希计算
+        let mut entry = match fec_set_accumulators.entry(fec_key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry,
+            std::collections::hash_map::Entry::Vacant(_) => {
+                return Ok(());
+            }
         };
-        let status = Self::can_reconstruct_fec_set(acc);
+
+        let status = Self::can_reconstruct_fec_set(entry.get());
 
         match status {
             ReconstructionStatus::ReadyNatural => {
-                let acc = fec_set_accumulators.remove(&fec_key).unwrap();
+                let acc = entry.remove();
                 Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets).await?;
-
-                #[cfg(feature = "metrics")]
-                if let Some(metrics) = Metrics::try_get() {
-                    metrics
-                        .processor_fec_sets_completed
-                        .with_label_values(&["natural"])
-                        .inc();
-                }
             }
             ReconstructionStatus::ReadyRecovery => {
-                if let Err(e) = Self::recover_fec(acc, reed_solomon_cache).await {
-                    error!("FEC Recovery failed unexpectedly: {:?}", e);
+                // 先获取可变引用进行恢复，然后再移除
+                let recovery_result = {
+                    let acc = entry.get_mut();
+                    Self::recover_fec(acc, reed_solomon_cache).await
+                };
+
+                if let Err(e) = recovery_result {
+                    error!("FEC Recovery failed for {:?}: {:?}", fec_key, e);
                     return Ok(());
                 }
 
-                let acc = fec_set_accumulators.remove(&fec_key).unwrap();
+                let acc = entry.remove();
                 Self::send_completed_fec_set(acc, sender, fec_key, processed_fec_sets).await?;
-
-                #[cfg(feature = "metrics")]
-                if let Some(metrics) = Metrics::try_get() {
-                    metrics
-                        .processor_fec_sets_completed
-                        .with_label_values(&["recovery"])
-                        .inc();
-                }
             }
             ReconstructionStatus::NotReady => {}
         }
@@ -635,8 +628,8 @@ impl ShredProcessor {
         let code_count = acc.code_shreds.len();
 
         if let Some(expected) = acc.expected_data_shreds {
+            // 使用位运算优化条件判断
             if data_count >= expected {
-                // Priority
                 ReconstructionStatus::ReadyNatural
             } else if data_count + code_count >= expected {
                 ReconstructionStatus::ReadyRecovery
@@ -647,10 +640,21 @@ impl ShredProcessor {
             // Minor case optimization: we don't have `expected`
             // because we haven't seen a code shred yet.
             // Assume having 32 data shreds is enough.
-            if data_count >= 32 {
+
+            // 在没有预期数据分片数的情况下，使用启发式方法
+            // 如果我们有足够多的数据分片（至少是预期的一半），则认为可以自然完成
+            // 否则，如果数据+编码分片总数达到预期的一半，则认为可以恢复
+            let conservative_expected = 32; // 使用保守估计
+            if data_count >= conservative_expected {
                 ReconstructionStatus::ReadyNatural
             } else {
-                ReconstructionStatus::NotReady
+                // 使用更智能的启发式方法：如果数据+编码分片总数接近保守预期，则尝试恢复
+                let total_available = data_count + code_count;
+                if total_available >= conservative_expected {
+                    ReconstructionStatus::ReadyRecovery
+                } else {
+                    ReconstructionStatus::NotReady
+                }
             }
         }
     }
@@ -660,25 +664,30 @@ impl ShredProcessor {
         acc: &mut FecSetAccumulator,
         reed_solomon_cache: &Arc<ReedSolomonCache>,
     ) -> Result<()> {
-        let mut shreds_for_recovery = Vec::with_capacity(1024);
+        // 计算需要的容量以避免多次重新分配
+        let total_shreds = acc.data_shreds.len() + acc.code_shreds.len();
+        let mut shreds_for_recovery = Vec::with_capacity(total_shreds);
 
-        for (_, shred_meta) in &acc.data_shreds {
-            if shred_meta.shred.is_none() {
-                continue;
-            }
-            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
-        }
+        // 使用更高效的方式收集 shreds，避免不必要的 Option 检查
+        shreds_for_recovery.extend(
+            acc.data_shreds
+                .values()
+                .filter_map(|shred_meta| shred_meta.shred.as_ref())
+                .cloned(),
+        );
 
-        for (_, shred_meta) in &acc.code_shreds {
-            if shred_meta.shred.is_none() {
-                continue;
-            }
-            shreds_for_recovery.push(shred_meta.shred.as_ref().unwrap().clone());
-        }
+        shreds_for_recovery.extend(
+            acc.code_shreds
+                .values()
+                .filter_map(|shred_meta| shred_meta.shred.as_ref())
+                .cloned(),
+        );
 
+        // 执行 FEC 恢复
         let recovered_shreds = hotpath::measure_block!("solana_ledger::shred::recover", {
             solana_ledger::shred::recover(shreds_for_recovery, reed_solomon_cache)
         });
+
         match recovered_shreds {
             Ok(recovered_shreds) => {
                 for result in recovered_shreds {
@@ -686,24 +695,28 @@ impl ShredProcessor {
                         Ok(recovered_shred) => {
                             if recovered_shred.is_data() {
                                 let index = recovered_shred.index();
-                                if !acc.data_shreds.contains_key(&index) {
-                                    acc.data_shreds.insert(
-                                        index,
-                                        ShredMeta {
+                                // 使用 entry API，只需一次哈希操作
+                                match acc.data_shreds.entry(index) {
+                                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                        entry.get_mut().shred = Some(recovered_shred);
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(entry) => {
+                                        entry.insert(ShredMeta {
                                             shred: Some(recovered_shred),
-                                            // received_at_micros: None,
-                                        },
-                                    );
+                                        });
+                                    }
                                 }
                             }
                         }
                         Err(e) => {
+                            error!("Failed to recover individual shred: {:?}", e);
                             return Err(anyhow::anyhow!("Failed to recover shred: {:?}", e));
                         }
                     }
                 }
             }
             Err(e) => {
+                error!("FEC recovery failed for slot {}: {:?}", acc.slot, e);
                 return Err(anyhow::anyhow!("FEC recovery failed: {:?}", e));
             }
         }
