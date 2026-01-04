@@ -3,7 +3,7 @@ use crate::metrics::Metrics;
 use crate::{types::ShredBytesMeta, TransactionEvent, TransactionHandler, UnshredConfig};
 
 use crate::types::ProcessedFecSets;
-use crate::wincode::EntryProxy;
+use crate::wincode::{Entries, EntryProxy};
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use anyhow::Result;
 use crossbeam::queue::SegQueue;
@@ -179,6 +179,7 @@ use crate::socket_reader::SocketReader;
 #[cfg(target_os = "linux")]
 use crate::xdp_reader::XdpReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use wincode::Deserialize;
 
 pub struct ShredProcessor {
     // fec_load_average: Arc<AtomicUsize>,
@@ -483,10 +484,10 @@ impl ShredProcessor {
         processed_fec_sets: &ProcessedFecSets,
         // pool: &Arc<Pool<ShredMetaPool, ShredMeta>>,
     ) -> Result<()> {
-        let shred = hotpath::measure_block!("Shred::new_from_serialized_shred", {
-            Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..))
-        });
-        let shred = match shred {
+        // let shred = hotpath::measure_block!("Shred::new_from_serialized_shred", {
+        //     Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..))
+        // });
+        let shred = match Shred::new_from_serialized_shred(shred_bytes_meta.shred_bytes.slice(..)) {
             Ok(shred) => shred,
             Err(e) => {
                 error!("Failed to parse shred: {}", e);
@@ -498,12 +499,14 @@ impl ShredProcessor {
         let fec_set_index = shred.fec_set_index();
         let fec_key = (slot, fec_set_index);
 
-        let accumulator =
-            hotpath::measure_block!("process_fec_shred.fec_set_accumulators.entry(fec_key)", {
-                fec_set_accumulators
-                    .entry(fec_key)
-                    .or_insert_with(|| FecSetAccumulator::new(slot, 64))
-            });
+        let accumulator = fec_set_accumulators
+            .entry(fec_key)
+            .or_insert_with(|| FecSetAccumulator::new(slot, 64));
+        // hotpath::measure_block!("process_fec_shred.fec_set_accumulators.entry(fec_key)", {
+        //     fec_set_accumulators
+        //         .entry(fec_key)
+        //         .or_insert_with(|| FecSetAccumulator::new(slot, 64))
+        // });
 
         let shred_meta = ShredMeta { shred: Some(shred) };
         // shred_meta.received_at_micros = shred_bytes_meta.received_at_micros;
@@ -523,7 +526,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    // #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn store_fec_shred(accumulator: &mut FecSetAccumulator, shred_meta: ShredMeta) -> Result<()> {
         let shred = shred_meta.shred.as_ref();
         if shred.is_none() {
@@ -626,7 +629,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    // #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn can_reconstruct_fec_set(acc: &FecSetAccumulator) -> ReconstructionStatus {
         let data_count = acc.data_shreds.len();
         let code_count = acc.code_shreds.len();
@@ -708,7 +711,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    // #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn send_completed_fec_set(
         acc: FecSetAccumulator,
         sender: &Sender<CompletedFecSet>,
@@ -852,9 +855,10 @@ impl ShredProcessor {
             })
             .collect();
 
-        hotpath::measure_block!("new_batch_complete_indices.sort_unstable()", {
-            new_batch_complete_indices.sort_unstable();
-        });
+        // hotpath::measure_block!("new_batch_complete_indices.sort_unstable()", {
+        //     new_batch_complete_indices.sort_unstable();
+        // });
+        new_batch_complete_indices.sort_unstable();
 
         // Dispatch completed batches
         for batch_end_idx in new_batch_complete_indices {
@@ -890,10 +894,10 @@ impl ShredProcessor {
             };
             let sender = &batch_senders[*next_worker % batch_senders.len()];
             *next_worker += 1;
-            let send_result =
-                hotpath::measure_block!("try_dispatch_complete_batch.sender.send(batch_work)", {
-                    sender.send(batch_work).await
-                });
+            let send_result = sender.send(batch_work).await;
+            // hotpath::measure_block!("try_dispatch_complete_batch.sender.send(batch_work)", {
+            //     sender.send(batch_work).await
+            // });
             if let Err(e) = send_result {
                 return Err(anyhow::anyhow!("Failed to send batch work: {}", e));
             }
@@ -966,16 +970,17 @@ impl ShredProcessor {
 
         let entries = Self::parse_entries_from_batch_data(combined_data_meta)?;
 
-        for entry_meta in entries {
-            Self::process_entry_transactions(
-                batch_work.slot,
-                &entry_meta,
-                tx_handler,
-                batch_work.cached_timestamp,
-            )
-            .await?;
-        }
-
+        hotpath::measure_block!("for_in_process_entry_transactions", {
+            for entry_meta in entries {
+                Self::process_entry_transactions(
+                    batch_work.slot,
+                    &entry_meta,
+                    tx_handler,
+                    batch_work.cached_timestamp,
+                )
+                .await?;
+            }
+        });
         Ok(())
     }
 
@@ -1034,41 +1039,39 @@ impl ShredProcessor {
         if combined_data.len() <= 8 {
             return Ok(Vec::new());
         }
-        // let shred_indices = &combined_data_meta.combined_data_shred_indices;
-        // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
+        // // let shred_indices = &combined_data_meta.combined_data_shred_indices;
+        // // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
 
-        let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        let mut cursor = wincode::io::Cursor::new(&combined_data);
-        cursor.set_position(8);
+        // let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
+        // let mut cursor = wincode::io::Cursor::new(&combined_data);
+        // cursor.set_position(8);
 
-        let mut entries = Vec::with_capacity(entry_count as usize);
-        for _ in 0..entry_count {
-            // let entry_start_pos = cursor.position() as usize;
+        // let mut entries = Vec::with_capacity(entry_count as usize);
+        // for _ in 0..entry_count {
+        //     match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
+        //         Ok(entry) => {
+        //             let entry = entry.to_entry();
+        //             entries.push(EntryMeta {
+        //                 entry,
+        //                 received_at_micros: None,
+        //             });
+        //         }
+        //         Err(e) => {
+        //             return Err(anyhow::anyhow!("Error deserializing entry {:?}", e));
+        //         }
+        //     }
+        // }
 
-            let entry = hotpath::measure_block!("wincode::deserialize_from::<EntryProxy>", {
-                wincode::deserialize_from::<EntryProxy>(&mut cursor)
-            });
-            match entry {
-                Ok(entry) => {
-                    let entry = entry.to_entry();
-                    // let earliest_timestamp = Self::find_earliest_contributing_shred_timestamp(
-                    //     entry_start_pos,
-                    //     shred_indices,
-                    //     shred_received_at_micros,
-                    // )?;
-
-                    entries.push(EntryMeta {
-                        entry,
-                        received_at_micros: None,
-                    });
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Error deserializing entry {:?}", e));
-                }
-            }
-        }
-
-        Ok(entries)
+        let entries = Entries::deserialize(combined_data.as_slice())?;
+        Ok(entries
+            .vec
+            .into_iter()
+            // .map(|entry| entry.to_entry())
+            .map(|entry| EntryMeta {
+                entry,
+                received_at_micros: None,
+            })
+            .collect::<Vec<_>>())
     }
 
     fn find_earliest_contributing_shred_timestamp(
@@ -1138,7 +1141,7 @@ impl ShredProcessor {
         Ok(())
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    // #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn cleanup_fec_sets(
         fec_sets: &mut HashMap<(u64, u32), FecSetAccumulator>,
         processed_fec_sets: &Arc<ProcessedFecSets>,
@@ -1169,7 +1172,7 @@ impl ShredProcessor {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    // #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn cleanup_memory(
         slot_accumulators: &mut HashMap<u64, SlotAccumulator>,
         processed_slots: &mut HashSet<u64>,

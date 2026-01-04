@@ -5,11 +5,68 @@ use solana_sdk::message::MESSAGE_VERSION_PREFIX;
 use solana_sdk::signature::Signature;
 use std::mem;
 use std::mem::MaybeUninit;
+use arrayref::array_ref;
 use wincode::containers::{Elem, Pod};
 use wincode::error::invalid_tag_encoding;
-use wincode::io::Reader;
+use wincode::io::{Reader, Writer};
 use wincode::len::ShortU16Len;
-use wincode::{containers, ReadResult, SchemaRead, SchemaWrite};
+use wincode::{containers, ReadResult, SchemaRead, SchemaWrite, WriteResult};
+
+struct U32SeqLen;
+impl wincode::len::SeqLen for U32SeqLen {
+    fn read<'de, T>(reader: &mut impl Reader<'de>) -> ReadResult<usize> {
+        // let Ok((len, read)) = decode_shortu16_len(reader.fill_buf(3)?) else {
+        //     return Err(read_length_encoding_overflow("u16::MAX"));
+        // };
+        let bytes = reader.fill_buf(4)?;
+        let len = u32::from_le_bytes(*array_ref![bytes, 0, 4]) as usize;
+        unsafe { reader.consume_unchecked(4) };
+        Ok(len)
+    }
+
+    fn write(writer: &mut impl Writer, len: usize) -> WriteResult<()> {
+        u32::write(writer, &(len as u32))
+    }
+
+    fn write_bytes_needed(len: usize) -> WriteResult<usize> {
+        Ok(4)
+    }
+}
+
+struct U64SeqLen;
+impl wincode::len::SeqLen for U64SeqLen {
+    fn read<'de, T>(reader: &mut impl Reader<'de>) -> ReadResult<usize> {
+        // let Ok((len, read)) = decode_shortu16_len(reader.fill_buf(3)?) else {
+        //     return Err(read_length_encoding_overflow("u16::MAX"));
+        // };
+        let bytes = reader.fill_buf(8)?;
+        let len = u64::from_le_bytes(*array_ref![bytes, 0, 8]) as usize;
+        unsafe { reader.consume_unchecked(8) };
+        Ok(len)
+    }
+
+    fn write(writer: &mut impl Writer, len: usize) -> WriteResult<()> {
+        u64::write(writer, &(len as u64))
+    }
+
+    fn write_bytes_needed(len: usize) -> WriteResult<usize> {
+        Ok(8)
+    }
+}
+
+#[derive(SchemaRead)]
+pub struct Entries {
+    #[wincode(with = "containers::Vec::<Entry, U64SeqLen>")]
+    pub vec: Vec<solana_entry::entry::Entry>,
+}
+
+#[derive(SchemaRead)]
+#[wincode(from = "solana_entry::entry::Entry", struct_extensions)]
+pub struct Entry {
+    pub num_hashes: u64,
+    pub hash: Pod<Hash>,
+    pub transactions: Vec<VersionedTransaction>,
+}
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, SchemaRead)]
 pub struct EntryProxy {
