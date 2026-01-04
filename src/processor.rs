@@ -1039,34 +1039,10 @@ impl ShredProcessor {
         if combined_data.len() <= 8 {
             return Ok(Vec::new());
         }
-        // // let shred_indices = &combined_data_meta.combined_data_shred_indices;
-        // // let shred_received_at_micros = &combined_data_meta.combined_data_shred_received_at_micros;
-
-        // let entry_count = u64::from_le_bytes(combined_data[0..8].try_into()?);
-        // let mut cursor = wincode::io::Cursor::new(&combined_data);
-        // cursor.set_position(8);
-
-        // let mut entries = Vec::with_capacity(entry_count as usize);
-        // for _ in 0..entry_count {
-        //     match wincode::deserialize_from::<EntryProxy>(&mut cursor) {
-        //         Ok(entry) => {
-        //             let entry = entry.to_entry();
-        //             entries.push(EntryMeta {
-        //                 entry,
-        //                 received_at_micros: None,
-        //             });
-        //         }
-        //         Err(e) => {
-        //             return Err(anyhow::anyhow!("Error deserializing entry {:?}", e));
-        //         }
-        //     }
-        // }
-
         let entries = Entries::deserialize(combined_data.as_slice())?;
         Ok(entries
             .vec
             .into_iter()
-            // .map(|entry| entry.to_entry())
             .map(|entry| EntryMeta {
                 entry,
                 received_at_micros: None,
