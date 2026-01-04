@@ -818,12 +818,10 @@ impl ShredProcessor {
 
         let accumulator = slot_accumulators
             .entry(slot)
-            .or_insert_with(|| SlotAccumulator::new(128));
+            .or_insert_with(|| SlotAccumulator::new(128.max(completed_fec_set.data_shreds.len())));
 
-        // Add all data shreds from completed FEC set
-        for (index, shred_meta) in completed_fec_set.data_shreds {
-            accumulator.data_shreds.insert(index, shred_meta);
-        }
+        // 使用 extend 方法一次性转移所有数据，比循环插入更高效
+        accumulator.data_shreds.extend(completed_fec_set.data_shreds);
 
         self.try_dispatch_complete_batch(accumulator, slot, batch_senders, next_worker)
             .await?;
